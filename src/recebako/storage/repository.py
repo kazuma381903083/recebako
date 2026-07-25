@@ -14,6 +14,7 @@ from recebako.domain import (
     ValidationIssue,
     ValidationResult,
 )
+from recebako.storage.image_paths import validate_image_path
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,7 @@ class ReceiptRepository:
                     record.validation.status.value,
                     receipt_values[8],
                     record.phash,
-                    str(record.image_path.resolve()),
+                    validate_image_path(record.image_path),
                     record.ingest_mode.value,
                     _encode_validation_issues(record.validation.issues),
                     _encode_raw_payload(record.raw_payload),
@@ -196,6 +197,48 @@ class ReceiptRepository:
                 )
 
         return int(receipt_id)
+
+    def update_image_path(self, receipt_id: int, image_path: Path) -> None:
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE receipts
+                SET image_path = ?
+                WHERE id = ?
+                """,
+                (validate_image_path(image_path), receipt_id),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError("更新対象のreceiptが見つかりません")
+
+    def find_by_image_path(self, image_path: Path) -> StoredReceipt | None:
+        rows = self._connection.execute(
+            """
+            SELECT id
+            FROM receipts
+            WHERE image_path = ?
+            ORDER BY id
+            """,
+            (validate_image_path(image_path),),
+        ).fetchall()
+        if len(rows) > 1:
+            raise sqlite3.DatabaseError("同じprocessingパスのreceiptが複数あります")
+        return None if not rows else self.get(int(rows[0]["id"]))
+
+    def list_with_image_path_prefix(self, prefix: str) -> list[StoredReceipt]:
+        safe_prefix = validate_image_path(prefix)
+        rows = self._connection.execute(
+            """
+            SELECT id
+            FROM receipts
+            WHERE image_path LIKE ?
+            ORDER BY id
+            """,
+            (f"{safe_prefix}/%",),
+        ).fetchall()
+        return [
+            receipt for row in rows if (receipt := self.get(int(row["id"]))) is not None
+        ]
 
     def get(self, receipt_id: int) -> StoredReceipt | None:
         row = self._connection.execute(

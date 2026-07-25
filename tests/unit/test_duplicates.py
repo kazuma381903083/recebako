@@ -66,7 +66,7 @@ def _save(
             extraction=extraction,
             validation=ValidationResult(status=status, issues=[]),
             phash=phash,
-            image_path=tmp_path / "receipt.jpg",
+            image_path=Path("unmanaged") / f"{phash}.jpg",
             ingest_mode=IngestMode.REGULAR,
             raw_payload=extraction.model_dump_json(),
             duplicate_of_id=duplicate_of_id,

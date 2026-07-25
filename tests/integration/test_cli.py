@@ -11,6 +11,12 @@ from PIL import Image
 
 from recebako import cli
 from recebako.config import CONFIG_ENV_VAR
+from recebako.runtime import (
+    InboxLock,
+    claim_inbox_file,
+    initialize_runtime,
+    scan_inbox,
+)
 
 
 def _write_config(tmp_path: Path, data_root: Path) -> Path:
@@ -411,12 +417,22 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
             """,
             (second_output["receipt_id"],),
         ).fetchone()
+        image_paths = connection.execute(
+            "SELECT image_path FROM receipts ORDER BY id"
+        ).fetchall()
 
     assert receipt_count is not None and receipt_count[0] == 2
     assert item_count is not None and item_count[0] == 2
     assert confirmed_count is not None and confirmed_count[0] == 1
     assert duplicate_row is not None
     assert duplicate_row[0] == first_output["receipt_id"]
+    assert image_path.is_file()
+    assert all(
+        not Path(stored_path[0]).is_absolute()
+        and ".." not in Path(stored_path[0]).parts
+        and stored_path[0].startswith("unmanaged/")
+        for stored_path in image_paths
+    )
 
 
 def test_process_historical_mode_saves_old_receipt_as_confirmed(
@@ -498,3 +514,166 @@ def test_process_normalizes_mixed_tax_and_saves_audit_fields(
         (8, 140, 11, "excluded"),
         (10, 570, 51, "included"),
     ]
+
+
+def test_runtime_init_command_prints_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+
+    exit_code = cli.run(["runtime", "init"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output == {
+        "data_root_initialized": True,
+        "database_initialized": True,
+        "directories": [
+            "inbox",
+            "processing",
+            "archive",
+            "review",
+            "failed",
+            "reports",
+            "logs",
+            "tmp",
+        ],
+    }
+    assert captured.err == ""
+
+
+def test_inbox_run_command_outputs_one_json_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    image_path = data_root / "inbox" / "receipt.JPG"
+    image_path.parent.mkdir(parents=True)
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _ollama_payload(receipt_date=_today().isoformat()),
+    )
+
+    exit_code = cli.run(["inbox", "run", "--limit", "1"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["scanned"] == 1
+    assert output["processed"] == 1
+    assert output["confirmed"] == 1
+    assert output["results"][0]["source_name"] == "receipt.JPG"
+    assert output["results"][0]["destination"].startswith("archive/")
+    serialized = json.dumps(output, ensure_ascii=False)
+    for private_field in ("store", "items", "total", "raw_payload"):
+        assert private_field not in serialized
+    assert captured.err == ""
+
+
+def test_inbox_run_with_no_files_is_successful_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+
+    exit_code = cli.run(["inbox", "run"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["scanned"] == 0
+    assert output["results"] == []
+    assert captured.err == ""
+
+
+def test_runtime_recover_dry_run_prints_json_without_moving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    paths, _ = initialize_runtime(data_root)
+    source = paths.inbox / "receipt.jpg"
+    source.write_bytes(b"synthetic")
+    work_path = claim_inbox_file(
+        scan_inbox(paths).selected[0],
+        paths,
+        token="a" * 32,
+    )
+
+    exit_code = cli.run(["runtime", "recover", "--dry-run"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["dry_run"] is True
+    assert output["recovered"] == 1
+    assert output["results"][0]["action"] == "return_to_inbox"
+    assert work_path.is_file()
+    assert captured.err == ""
+
+
+def test_inbox_run_rejects_second_process_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    paths, _ = initialize_runtime(data_root)
+
+    with InboxLock(paths):
+        exit_code = cli.run(["inbox", "run"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "すでに実行中" in captured.err
+
+
+def test_inbox_run_failure_keeps_stdout_json_and_stderr_diagnostic_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    image_path = data_root / "inbox" / "receipt.jpg"
+    image_path.parent.mkdir(parents=True)
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: (_ for _ in ()).throw(
+            cli.OllamaError("秘密の商品 9999円 raw-response")
+        ),
+    )
+
+    exit_code = cli.run(["inbox", "run"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["failed"] == 1
+    assert output["results"][0]["status"] == "failed"
+    assert "1件の処理に失敗" in captured.err
+    for forbidden in ("秘密の商品", "9999", "raw-response"):
+        assert forbidden not in captured.out
+        assert forbidden not in captured.err

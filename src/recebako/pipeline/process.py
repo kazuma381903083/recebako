@@ -60,8 +60,13 @@ def process_receipt(
     config: AppConfig,
     mode: IngestMode,
     reference_date: date,
+    storage_image_path: Path | None = None,
+    temporary_root: Path | None = None,
 ) -> ProcessResult:
-    with preprocess_image(image_path) as preprocessed:
+    with preprocess_image(
+        image_path,
+        temporary_root=temporary_root,
+    ) as preprocessed:
         raw_payload = request_receipt_extraction(
             preprocessed.path,
             base_url=config.ollama.base_url,
@@ -74,6 +79,9 @@ def process_receipt(
             mode=mode,
         )
         phash = preprocessed.phash
+    persisted_image_path = storage_image_path or (
+        Path("unmanaged") / f"{phash}_{image_path.name}"
+    )
 
     try:
         initialize_database(config.data.root)
@@ -99,7 +107,7 @@ def process_receipt(
                     extraction=extraction,
                     validation=validation,
                     phash=phash,
-                    image_path=image_path,
+                    image_path=persisted_image_path,
                     ingest_mode=mode,
                     raw_payload=raw_payload,
                     duplicate_of_id=(

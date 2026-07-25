@@ -39,6 +39,18 @@ class OllamaError(RuntimeError):
     """Ollamaとの通信または応答検証に失敗したことを表す。"""
 
 
+class OllamaTimeoutError(OllamaError):
+    """Ollamaの推論が制限時間内に完了しなかったことを表す。"""
+
+
+class OllamaConnectionError(OllamaError):
+    """localhostのOllamaへ接続できなかったことを表す。"""
+
+
+class OllamaResponseError(OllamaError):
+    """Ollamaが処理不能なHTTPまたは応答内容を返したことを表す。"""
+
+
 class _OllamaMessage(BaseModel):
     content: str
     thinking: str = ""
@@ -102,24 +114,24 @@ def request_receipt_extraction(
             )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise OllamaError(
+        raise OllamaResponseError(
             f"OllamaがHTTP {exc.response.status_code}を返しました"
         ) from exc
     except httpx.ReadTimeout as exc:
-        raise OllamaError(
+        raise OllamaTimeoutError(
             f"Ollamaの推論が{int(READ_TIMEOUT_SECONDS)}秒以内に完了しませんでした"
         ) from exc
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        raise OllamaError(
+        raise OllamaConnectionError(
             "Ollamaへ接続できませんでした (http://127.0.0.1:11434 を確認してください)"
         ) from exc
     except httpx.RequestError as exc:
-        raise OllamaError("Ollamaとのローカル通信に失敗しました") from exc
+        raise OllamaConnectionError("Ollamaとのローカル通信に失敗しました") from exc
 
     try:
         chat_response = _OllamaChatResponse.model_validate(response.json())
     except (ValueError, ValidationError) as exc:
-        raise OllamaError("Ollamaから無効な応答を受信しました") from exc
+        raise OllamaResponseError("Ollamaから無効な応答を受信しました") from exc
 
     if chat_response.message.content.strip():
         return chat_response.message.content
@@ -143,4 +155,4 @@ def extract_receipt(
             )
         )
     except ValidationError as exc:
-        raise OllamaError("Ollamaから無効な構造化応答を受信しました") from exc
+        raise OllamaResponseError("Ollamaから無効な構造化応答を受信しました") from exc

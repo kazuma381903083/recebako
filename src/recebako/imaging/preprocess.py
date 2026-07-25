@@ -68,7 +68,11 @@ def _load_source_image(source_path: Path) -> tuple[Image.Image, str]:
 
 
 @contextmanager
-def preprocess_image(source_path: Path) -> Iterator[PreprocessedImage]:
+def preprocess_image(
+    source_path: Path,
+    *,
+    temporary_root: Path | None = None,
+) -> Iterator[PreprocessedImage]:
     rgb_image, source_phash = _load_source_image(source_path)
 
     with rgb_image:
@@ -78,7 +82,10 @@ def preprocess_image(source_path: Path) -> Iterator[PreprocessedImage]:
                 Image.Resampling.LANCZOS,
             )
 
-        with tempfile.TemporaryDirectory(prefix="recebako-") as temporary_directory:
+        with tempfile.TemporaryDirectory(
+            prefix="recebako-",
+            dir=temporary_root,
+        ) as temporary_directory:
             output_path = Path(temporary_directory) / "preprocessed.jpg"
             try:
                 rgb_image.save(output_path, format="JPEG", quality=90)

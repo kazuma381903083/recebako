@@ -14,6 +14,7 @@ from recebako.domain import (
     ValidationResult,
 )
 from recebako.storage import (
+    ImagePathError,
     ReceiptRepository,
     ReceiptWrite,
     apply_migrations,
@@ -94,7 +95,7 @@ def _write(tmp_path: Path) -> ReceiptWrite:
             ],
         ),
         phash="0000000000000000",
-        image_path=tmp_path / "receipt.jpg",
+        image_path=Path("unmanaged/receipt.jpg"),
         ingest_mode=IngestMode.REGULAR,
         raw_payload='{"source":"ollama"}',
     )
@@ -151,6 +152,7 @@ def test_repository_saves_and_reads_receipt_and_items(
     assert stored.date_raw == "2026/7/25"
     assert stored.date == "2026-07-25"
     assert stored.status is ReceiptStatus.REVIEW
+    assert stored.image_path == "unmanaged/receipt.jpg"
     assert [item.name for item in stored.items] == ["外税商品", "内税商品"]
     assert [item.name_norm for item in stored.items] == [None, None]
     assert [item.price for item in stored.items] == [151, 570]
@@ -249,6 +251,55 @@ def test_tax_normalization_rejection_reason_uses_existing_json_field(
             "field": "tax_breakdowns",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        Path("/absolute/receipt.jpg"),
+        Path("../outside/receipt.jpg"),
+        Path("processing/../../outside.jpg"),
+    ],
+)
+def test_repository_rejects_unsafe_image_paths(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+    image_path: Path,
+) -> None:
+    record = _write(tmp_path)
+    unsafe_record = ReceiptWrite(
+        extraction=record.extraction,
+        validation=record.validation,
+        phash=record.phash,
+        image_path=image_path,
+        ingest_mode=record.ingest_mode,
+        raw_payload=record.raw_payload,
+    )
+
+    with pytest.raises(ImagePathError):
+        ReceiptRepository(connection).save(unsafe_record)
+
+    count = connection.execute("SELECT COUNT(*) FROM receipts").fetchone()
+    assert count is not None and count[0] == 0
+
+
+def test_repository_finds_and_updates_relative_image_path(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    repository = ReceiptRepository(connection)
+    receipt_id = repository.save(_write(tmp_path))
+
+    found = repository.find_by_image_path(Path("unmanaged/receipt.jpg"))
+    repository.update_image_path(
+        receipt_id,
+        Path("review/1_receipt.jpg"),
+    )
+    updated = repository.get(receipt_id)
+
+    assert found is not None and found.id == receipt_id
+    assert updated is not None
+    assert updated.image_path == "review/1_receipt.jpg"
 
 
 def test_item_failure_rolls_back_receipt(

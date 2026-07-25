@@ -73,6 +73,24 @@ def test_preprocess_converts_to_rgb_and_generates_phash(tmp_path: Path) -> None:
         int(processed.phash, 16)
 
 
+def test_preprocess_uses_requested_temporary_root_and_cleans_it(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.jpg"
+    temporary_root = tmp_path / "runtime-tmp"
+    temporary_root.mkdir()
+    _save_image(source_path)
+
+    with preprocess_image(
+        source_path,
+        temporary_root=temporary_root,
+    ) as processed:
+        assert processed.path.is_relative_to(temporary_root)
+        assert processed.path.is_file()
+
+    assert list(temporary_root.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     ("suffix", "image_format"),
     [

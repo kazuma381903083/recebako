@@ -10,6 +10,11 @@ from recebako.storage.duplicates import (
     find_duplicate_candidate,
     phash_hamming_distance,
 )
+from recebako.storage.image_paths import (
+    ImagePathError,
+    image_path_relative_to_root,
+    validate_image_path,
+)
 from recebako.storage.migration import MigrationError, apply_migrations
 from recebako.storage.repository import (
     ReceiptRepository,
@@ -22,6 +27,7 @@ from recebako.storage.repository import (
 __all__ = [
     "DEFAULT_PHASH_DISTANCE_THRESHOLD",
     "DuplicateCandidate",
+    "ImagePathError",
     "MigrationError",
     "ReceiptRepository",
     "ReceiptWrite",
@@ -33,6 +39,8 @@ __all__ = [
     "connect_database",
     "database_path",
     "find_duplicate_candidate",
+    "image_path_relative_to_root",
     "initialize_database",
     "phash_hamming_distance",
+    "validate_image_path",
 ]

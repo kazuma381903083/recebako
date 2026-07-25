@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from recebako.ai import OllamaError, request_receipt_extraction
-from recebako.config import ConfigError, load_config
+from recebako.config import AppConfig, ConfigError, load_config
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
@@ -17,6 +17,13 @@ from recebako.domain import (
 )
 from recebako.imaging import ImagePreprocessError, preprocess_image
 from recebako.pipeline import process_receipt
+from recebako.runtime import (
+    InboxLockError,
+    RuntimeLayoutError,
+    initialize_runtime,
+    recover_runtime,
+    run_inbox,
+)
 from recebako.storage import (
     MigrationError,
     StorageError,
@@ -33,6 +40,16 @@ def _add_image_and_mode_arguments(parser: argparse.ArgumentParser) -> None:
         default=IngestMode.REGULAR.value,
         help="通常取込または過去取込を選択します。",
     )
+
+
+def _positive_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("1以上の整数を指定してください") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("1以上の整数を指定してください")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +74,52 @@ def build_parser() -> argparse.ArgumentParser:
     db_parser = subparsers.add_parser("db", help="SQLiteを管理します。")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
     db_subparsers.add_parser("init", help="SQLiteを初期化します。")
+
+    runtime_parser = subparsers.add_parser(
+        "runtime",
+        help="実行時ディレクトリを管理します。",
+    )
+    runtime_subparsers = runtime_parser.add_subparsers(
+        dest="runtime_command",
+        required=True,
+    )
+    runtime_subparsers.add_parser(
+        "init",
+        help="実行時ディレクトリとSQLiteを初期化します。",
+    )
+    recover_parser = runtime_subparsers.add_parser(
+        "recover",
+        help="中断されたファイル状態遷移を回復します。",
+    )
+    recover_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="ファイルとDBを変更せず回復予定だけを表示します。",
+    )
+
+    inbox_parser = subparsers.add_parser(
+        "inbox",
+        help="inboxの画像を処理します。",
+    )
+    inbox_subparsers = inbox_parser.add_subparsers(
+        dest="inbox_command",
+        required=True,
+    )
+    inbox_run_parser = inbox_subparsers.add_parser(
+        "run",
+        help="inbox直下の対象画像を一括処理します。",
+    )
+    inbox_run_parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in IngestMode],
+        default=IngestMode.REGULAR.value,
+        help="通常取込または過去取込を選択します。",
+    )
+    inbox_run_parser.add_argument(
+        "--limit",
+        type=_positive_integer,
+        help="今回処理する最大件数です。",
+    )
     return parser
 
 
@@ -144,6 +207,82 @@ def _run_process(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_runtime_config() -> AppConfig:
+    return load_config()
+
+
+def _run_runtime_init() -> int:
+    try:
+        config = _load_runtime_config()
+        _, result = initialize_runtime(config.data.root)
+    except (
+        ConfigError,
+        MigrationError,
+        OSError,
+        RuntimeLayoutError,
+        StorageError,
+    ) as exc:
+        print(f"recebako: error: {exc}", file=sys.stderr)
+        return 1
+    print(result.model_dump_json(indent=2))
+    return 0
+
+
+def _run_inbox(args: argparse.Namespace) -> int:
+    try:
+        config = _load_runtime_config()
+        result = run_inbox(
+            config=config,
+            mode=IngestMode(args.mode),
+            reference_date=_local_date(),
+            limit=args.limit,
+        )
+    except (
+        ConfigError,
+        InboxLockError,
+        MigrationError,
+        OSError,
+        RuntimeLayoutError,
+        StorageError,
+        ValueError,
+    ) as exc:
+        print(f"recebako: error: {exc}", file=sys.stderr)
+        return 1
+    if result.failed:
+        print(
+            f"recebako: warning: {result.failed}件の処理に失敗しました",
+            file=sys.stderr,
+        )
+    print(result.model_dump_json(indent=2))
+    return 0
+
+
+def _run_runtime_recover(args: argparse.Namespace) -> int:
+    try:
+        config = _load_runtime_config()
+        result = recover_runtime(
+            config=config,
+            fallback_date=_local_date(),
+            dry_run=bool(args.dry_run),
+        )
+    except (
+        ConfigError,
+        InboxLockError,
+        OSError,
+        RuntimeLayoutError,
+        StorageError,
+    ) as exc:
+        print(f"recebako: error: {exc}", file=sys.stderr)
+        return 1
+    if result.errors:
+        print(
+            f"recebako: warning: {result.errors}件を自動回復できませんでした",
+            file=sys.stderr,
+        )
+    print(result.model_dump_json(indent=2))
+    return 0
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "extract":
@@ -152,6 +291,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _run_process(args)
     if args.command == "db" and args.db_command == "init":
         return _run_db_init()
+    if args.command == "runtime" and args.runtime_command == "init":
+        return _run_runtime_init()
+    if args.command == "runtime" and args.runtime_command == "recover":
+        return _run_runtime_recover(args)
+    if args.command == "inbox" and args.inbox_command == "run":
+        return _run_inbox(args)
     raise AssertionError("到達不能なCLIコマンドです")
 
 
