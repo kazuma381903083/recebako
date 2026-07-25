@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from enum import Enum
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from recebako.domain import (
     IngestMode,
@@ -22,6 +23,33 @@ from recebako.normalization import (
 MINIMUM_CONFIDENCE = 0.8
 TOTAL_TOLERANCE_YEN = 2
 MAX_RECEIPT_AGE_DAYS = 365
+
+
+class SchemaOutcome(str, Enum):
+    NOT_EVALUATED = "not_evaluated"
+    VALID = "valid"
+    INVALID = "invalid"
+
+
+class DateNormalizationOutcome(str, Enum):
+    NOT_EVALUATED = "not_evaluated"
+    UNCHANGED = "unchanged"
+    NORMALIZED = "normalized"
+    REJECTED = "rejected"
+
+
+class ValidationAudit(BaseModel):
+    """Private receipt values must never be added to this safe audit model."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+    )
+
+    schema_outcome: SchemaOutcome
+    date_normalization_outcome: DateNormalizationOutcome
+    tax_normalization_reason: TaxNormalizationReason | None
 
 
 def _issue(code: str, message: str, field: str) -> ValidationIssue:
@@ -48,6 +76,17 @@ def normalize_receipt(
 def _normalize_receipt_with_tax_audit(
     receipt: ReceiptExtraction,
 ) -> tuple[NormalizedReceiptExtraction, TaxNormalizationAudit]:
+    normalized_receipt, tax_audit, _ = _normalize_receipt_with_audit(receipt)
+    return normalized_receipt, tax_audit
+
+
+def _normalize_receipt_with_audit(
+    receipt: ReceiptExtraction,
+) -> tuple[
+    NormalizedReceiptExtraction,
+    TaxNormalizationAudit,
+    DateNormalizationOutcome,
+]:
     normalization = normalize_receipt_date(receipt.date)
     tax_normalization = normalize_item_taxes_with_audit(
         list(receipt.items),
@@ -58,9 +97,16 @@ def _normalize_receipt_with_tax_audit(
     data["items"] = [item.model_dump(mode="python") for item in tax_normalization.items]
     data["date_raw"] = normalization.raw
     data["date"] = normalization.normalized or ""
+    if normalization.normalized is None:
+        date_outcome = DateNormalizationOutcome.REJECTED
+    elif normalization.normalized == normalization.raw:
+        date_outcome = DateNormalizationOutcome.UNCHANGED
+    else:
+        date_outcome = DateNormalizationOutcome.NORMALIZED
     return (
         NormalizedReceiptExtraction.model_validate(data),
         tax_normalization.audit,
+        date_outcome,
     )
 
 
@@ -227,24 +273,58 @@ def validate_receipt_payload(
     reference_date: date,
     mode: IngestMode = IngestMode.REGULAR,
 ) -> tuple[NormalizedReceiptExtraction | None, ValidationResult]:
+    receipt, validation, _ = validate_receipt_payload_with_audit(
+        payload,
+        reference_date=reference_date,
+        mode=mode,
+    )
+    return receipt, validation
+
+
+def validate_receipt_payload_with_audit(
+    payload: str | bytes | bytearray,
+    *,
+    reference_date: date,
+    mode: IngestMode = IngestMode.REGULAR,
+) -> tuple[
+    NormalizedReceiptExtraction | None,
+    ValidationResult,
+    ValidationAudit,
+]:
     try:
         receipt = ReceiptExtraction.model_validate_json(payload)
     except ValidationError:
-        return None, ValidationResult(
-            status=ReceiptStatus.FAILED,
-            issues=[
-                _issue(
-                    "structure.invalid",
-                    "Ollama応答をレシートスキーマとして検証できませんでした",
-                    "$",
-                )
-            ],
+        return (
+            None,
+            ValidationResult(
+                status=ReceiptStatus.FAILED,
+                issues=[
+                    _issue(
+                        "structure.invalid",
+                        "Ollama応答をレシートスキーマとして検証できませんでした",
+                        "$",
+                    )
+                ],
+            ),
+            ValidationAudit(
+                schema_outcome=SchemaOutcome.INVALID,
+                date_normalization_outcome=(DateNormalizationOutcome.NOT_EVALUATED),
+                tax_normalization_reason=None,
+            ),
         )
 
-    normalized_receipt, tax_audit = _normalize_receipt_with_tax_audit(receipt)
-    return normalized_receipt, _validate_normalized_receipt(
+    normalized_receipt, tax_audit, date_outcome = _normalize_receipt_with_audit(receipt)
+    return (
         normalized_receipt,
-        reference_date=reference_date,
-        mode=mode,
-        tax_audit=tax_audit,
+        _validate_normalized_receipt(
+            normalized_receipt,
+            reference_date=reference_date,
+            mode=mode,
+            tax_audit=tax_audit,
+        ),
+        ValidationAudit(
+            schema_outcome=SchemaOutcome.VALID,
+            date_normalization_outcome=date_outcome,
+            tax_normalization_reason=tax_audit.reason,
+        ),
     )

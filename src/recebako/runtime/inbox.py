@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 from recebako.ai import OllamaError
 from recebako.config import AppConfig
-from recebako.domain import IngestMode, ReceiptStatus
+from recebako.domain import IngestMode, ReceiptFileState, ReceiptStatus
 from recebako.imaging import ImagePreprocessError
 from recebako.pipeline import process_receipt
 from recebako.runtime.errors import (
@@ -27,6 +27,7 @@ from recebako.runtime.files import (
 )
 from recebako.runtime.layout import RuntimePaths, initialize_runtime
 from recebako.runtime.lock import InboxLock
+from recebako.runtime.recovery import recover_runtime
 from recebako.storage import (
     ImagePathError,
     MigrationError,
@@ -106,6 +107,14 @@ def run_inbox(
         raise ValueError("limitは1以上である必要があります")
 
     paths, _ = initialize_runtime(config.data.root)
+    recovery = recover_runtime(
+        config=config,
+        fallback_date=reference_date,
+        dry_run=False,
+    )
+    if recovery.errors:
+        raise RuntimeFileError("processingの自動回復に失敗しました")
+
     results: list[InboxItemResult] = []
     with InboxLock(paths):
         scan = scan_inbox(paths, limit=limit)
@@ -131,6 +140,7 @@ def run_inbox(
                     mode=mode,
                     reference_date=reference_date,
                     storage_image_path=Path("processing") / work_path.name,
+                    file_state=ReceiptFileState.PENDING,
                     temporary_root=paths.tmp,
                 )
             except (
@@ -169,7 +179,7 @@ def run_inbox(
                     destination,
                 )
                 with closing(connect_database(config.data.root)) as connection:
-                    ReceiptRepository(connection).update_image_path(
+                    ReceiptRepository(connection).finalize_image_path(
                         receipt_id,
                         Path(relative_destination),
                     )

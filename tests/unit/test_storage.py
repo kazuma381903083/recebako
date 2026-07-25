@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from dataclasses import replace
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
+    ReceiptFileState,
     ReceiptStatus,
     ValidationIssue,
     ValidationResult,
@@ -111,6 +114,11 @@ def test_initial_migration_creates_required_tables(tmp_path: Path) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
+        file_state_column = next(
+            row
+            for row in connection.execute("PRAGMA table_info(receipts)")
+            if row["name"] == "file_state"
+        )
     finally:
         connection.close()
 
@@ -123,6 +131,8 @@ def test_initial_migration_creates_required_tables(tmp_path: Path) -> None:
         "item_tax_details",
         "receipt_tax_breakdowns",
     } <= tables
+    assert file_state_column["notnull"] == 1
+    assert file_state_column["dflt_value"] == "'finalized'"
 
 
 def test_migration_can_be_applied_repeatedly(
@@ -135,6 +145,77 @@ def test_migration_can_be_applied_repeatedly(
     assert [row[0] for row in versions] == [
         "001_initial",
         "002_tax_normalization",
+        "003_receipt_file_state",
+    ]
+
+
+def test_file_state_migration_backfills_processing_rows_only(
+    tmp_path: Path,
+) -> None:
+    connection = connect_database(tmp_path)
+    migrations = files("recebako.storage.migrations")
+    try:
+        for name in ("001_initial.sql", "002_tax_normalization.sql"):
+            connection.executescript(
+                migrations.joinpath(name).read_text(encoding="utf-8")
+            )
+        connection.executemany(
+            """
+            INSERT INTO receipts (
+                store, date_raw, date, time, total, subtotal, tax, payment,
+                status, confidence, phash, image_path, ingest_mode,
+                validation_issues_json, raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "",
+                    "",
+                    "",
+                    "",
+                    0,
+                    0,
+                    0,
+                    "unknown",
+                    "failed",
+                    0.0,
+                    "0000000000000000",
+                    "processing/pending.jpg",
+                    "regular",
+                    "[]",
+                    "{}",
+                ),
+                (
+                    "",
+                    "",
+                    "",
+                    "",
+                    0,
+                    0,
+                    0,
+                    "unknown",
+                    "failed",
+                    0.0,
+                    "ffffffffffffffff",
+                    "archive/2026/07/finalized.jpg",
+                    "regular",
+                    "[]",
+                    "{}",
+                ),
+            ],
+        )
+
+        apply_migrations(connection)
+
+        states = connection.execute(
+            "SELECT image_path, file_state FROM receipts ORDER BY id"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert [(row["image_path"], row["file_state"]) for row in states] == [
+        ("processing/pending.jpg", "pending"),
+        ("archive/2026/07/finalized.jpg", "finalized"),
     ]
 
 
@@ -153,6 +234,7 @@ def test_repository_saves_and_reads_receipt_and_items(
     assert stored.date == "2026-07-25"
     assert stored.status is ReceiptStatus.REVIEW
     assert stored.image_path == "unmanaged/receipt.jpg"
+    assert stored.file_state is ReceiptFileState.FINALIZED
     assert [item.name for item in stored.items] == ["外税商品", "内税商品"]
     assert [item.name_norm for item in stored.items] == [None, None]
     assert [item.price for item in stored.items] == [151, 570]
@@ -300,6 +382,106 @@ def test_repository_finds_and_updates_relative_image_path(
     assert found is not None and found.id == receipt_id
     assert updated is not None
     assert updated.image_path == "review/1_receipt.jpg"
+    assert updated.file_state is ReceiptFileState.FINALIZED
+
+
+def test_repository_persists_pending_file_state(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    record = replace(
+        _write(tmp_path),
+        image_path=Path("processing/receipt.jpg"),
+        file_state=ReceiptFileState.PENDING,
+    )
+
+    stored = ReceiptRepository(connection).get(
+        ReceiptRepository(connection).save(record)
+    )
+
+    assert stored is not None
+    assert stored.image_path == "processing/receipt.jpg"
+    assert stored.file_state is ReceiptFileState.PENDING
+
+
+def test_finalize_image_path_updates_path_and_state_together(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    repository = ReceiptRepository(connection)
+    receipt_id = repository.save(
+        replace(
+            _write(tmp_path),
+            image_path=Path("processing/receipt.jpg"),
+            file_state=ReceiptFileState.PENDING,
+        )
+    )
+
+    repository.finalize_image_path(
+        receipt_id,
+        Path("archive/2026/07/1_receipt.jpg"),
+    )
+
+    stored = repository.get(receipt_id)
+    assert stored is not None
+    assert stored.image_path == "archive/2026/07/1_receipt.jpg"
+    assert stored.file_state is ReceiptFileState.FINALIZED
+
+
+def test_finalize_image_path_rolls_back_path_when_state_update_fails(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    repository = ReceiptRepository(connection)
+    receipt_id = repository.save(
+        replace(
+            _write(tmp_path),
+            image_path=Path("processing/receipt.jpg"),
+            file_state=ReceiptFileState.PENDING,
+        )
+    )
+    connection.executescript(
+        """
+        CREATE TRIGGER fail_file_finalization
+        BEFORE UPDATE OF file_state ON receipts
+        WHEN NEW.file_state = 'finalized'
+        BEGIN
+            SELECT RAISE(ABORT, 'forced finalization failure');
+        END;
+        """
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.finalize_image_path(
+            receipt_id,
+            Path("archive/2026/07/1_receipt.jpg"),
+        )
+
+    stored = repository.get(receipt_id)
+    assert stored is not None
+    assert stored.image_path == "processing/receipt.jpg"
+    assert stored.file_state is ReceiptFileState.PENDING
+
+
+def test_update_image_path_preserves_pending_state_for_compatibility(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    repository = ReceiptRepository(connection)
+    receipt_id = repository.save(
+        replace(
+            _write(tmp_path),
+            image_path=Path("processing/receipt.jpg"),
+            file_state=ReceiptFileState.PENDING,
+        )
+    )
+
+    repository.update_image_path(receipt_id, Path("review/1_receipt.jpg"))
+
+    stored = repository.get(receipt_id)
+    assert stored is not None
+    assert stored.image_path == "review/1_receipt.jpg"
+    assert stored.file_state is ReceiptFileState.PENDING
 
 
 def test_item_failure_rolls_back_receipt(

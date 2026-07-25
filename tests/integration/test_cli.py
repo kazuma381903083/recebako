@@ -10,9 +10,11 @@ import pytest
 from PIL import Image
 
 from recebako import cli
+from recebako.ai import OllamaTimeoutError
 from recebako.config import CONFIG_ENV_VAR
 from recebako.runtime import (
     InboxLock,
+    RuntimeFileError,
     claim_inbox_file,
     initialize_runtime,
     scan_inbox,
@@ -368,6 +370,7 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
     image_path = tmp_path / "receipt.png"
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
+    original_bytes = image_path.read_bytes()
     data_root = tmp_path / "data"
     config_path = _write_config(tmp_path, data_root)
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
@@ -418,7 +421,7 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
             (second_output["receipt_id"],),
         ).fetchone()
         image_paths = connection.execute(
-            "SELECT image_path FROM receipts ORDER BY id"
+            "SELECT image_path, file_state FROM receipts ORDER BY id"
         ).fetchall()
 
     assert receipt_count is not None and receipt_count[0] == 2
@@ -426,13 +429,71 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
     assert confirmed_count is not None and confirmed_count[0] == 1
     assert duplicate_row is not None
     assert duplicate_row[0] == first_output["receipt_id"]
-    assert image_path.is_file()
+    assert image_path.read_bytes() == original_bytes
     assert all(
         not Path(stored_path[0]).is_absolute()
         and ".." not in Path(stored_path[0]).parts
-        and stored_path[0].startswith("unmanaged/")
+        and (data_root / stored_path[0]).is_file()
+        and stored_path[1] == "finalized"
         for stored_path in image_paths
     )
+    assert image_paths[0][0].startswith("archive/")
+    assert image_paths[1][0].startswith("review/")
+
+
+def test_process_final_move_failure_stays_pending_and_is_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image_path = tmp_path / "receipt.png"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    original_bytes = image_path.read_bytes()
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _ollama_payload(receipt_date=_today().isoformat()),
+    )
+    original_move_to_final = cli.move_to_final
+
+    def fail_final_move(*args: Any, **kwargs: Any) -> Path:
+        raise RuntimeFileError("forced final move failure")
+
+    monkeypatch.setattr(cli, "move_to_final", fail_final_move)
+
+    exit_code = cli.run(["process", str(image_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert image_path.read_bytes() == original_bytes
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        pending = connection.execute(
+            "SELECT status, image_path, file_state FROM receipts WHERE id = 1"
+        ).fetchone()
+    assert pending is not None
+    assert pending[0] == "confirmed"
+    assert pending[1].startswith("processing/")
+    assert pending[2] == "pending"
+    assert (data_root / pending[1]).is_file()
+
+    monkeypatch.setattr(cli, "move_to_final", original_move_to_final)
+    recover_exit_code = cli.run(["runtime", "recover"])
+
+    recover_output = json.loads(capsys.readouterr().out)
+    assert recover_exit_code == 0
+    assert recover_output["recovered"] == 1
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        finalized = connection.execute(
+            "SELECT image_path, file_state FROM receipts WHERE id = 1"
+        ).fetchone()
+    assert finalized is not None
+    assert finalized[0].startswith("archive/")
+    assert finalized[1] == "finalized"
+    assert (data_root / finalized[0]).is_file()
 
 
 def test_process_historical_mode_saves_old_receipt_as_confirmed(
@@ -677,3 +738,360 @@ def test_inbox_run_failure_keeps_stdout_json_and_stderr_diagnostic_only(
     for forbidden in ("秘密の商品", "9999", "raw-response"):
         assert forbidden not in captured.out
         assert forbidden not in captured.err
+
+
+def test_evaluate_run_uses_default_models_and_isolated_ledgers_without_touching_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root = tmp_path / "evaluation-source"
+    source_root.mkdir()
+    source_image = source_root / "case-0001.jpeg"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(source_image)
+    source_snapshot = (
+        source_image.read_bytes(),
+        source_image.stat().st_ino,
+        source_image.stat().st_mtime_ns,
+    )
+
+    data_root = tmp_path / "normal-data"
+    data_root.mkdir()
+    sentinel = data_root / "keep.bin"
+    sentinel.write_bytes(b"normal-data-must-remain-unchanged")
+    sentinel_snapshot = (sentinel.read_bytes(), sentinel.stat().st_mtime_ns)
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+
+    raw_marker = "synthetic-sensitive-raw-marker"
+    private_store = f"synthetic-sensitive-store-{raw_marker}"
+    private_item = "synthetic-sensitive-item"
+    private_total = 765_431
+    calls: list[tuple[str, str, int, bytes]] = []
+
+    def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
+        calls.append(
+            (
+                kwargs["base_url"],
+                kwargs["model"],
+                kwargs["temperature"],
+                path.read_bytes(),
+            )
+        )
+        return json.dumps(
+            {
+                "store": private_store,
+                "date": "2026-07-25",
+                "time": "12:34",
+                "items": [{"name": private_item, "qty": 1, "price": private_total}],
+                "subtotal": private_total,
+                "tax": 0,
+                "total": private_total,
+                "payment": "cash",
+                "confidence": 0.99,
+            }
+        )
+
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        fake_request_receipt_extraction,
+    )
+    output_root = tmp_path / "evaluation-output"
+
+    exit_code = cli.run(
+        [
+            "evaluate",
+            "run",
+            str(source_root),
+            "--output-root",
+            str(output_root),
+            "--reference-date",
+            "2026-07-26",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0
+    assert captured.err == ""
+    assert [
+        (base_url, model, temperature) for base_url, model, temperature, _ in calls
+    ] == [
+        ("http://127.0.0.1:11434", "qwen3-vl:8b", 0),
+        ("http://127.0.0.1:11434", "qwen3.5:9b", 0),
+    ]
+    assert calls[0][3] == calls[1][3]
+    assert [model["model_name"] for model in report["models"]] == [
+        "qwen3-vl:8b",
+        "qwen3.5:9b",
+    ]
+    assert [
+        [case["case_id"] for case in model["cases"]] for model in report["models"]
+    ] == [["case-0001"], ["case-0001"]]
+    for model in report["models"]:
+        accuracy = model["accuracy"]
+        assert accuracy["status"] == "unknown"
+        assert accuracy["reason"] == "no_human_verified_ground_truth"
+        assert accuracy["verified_case_count"] == 0
+        for field_name in (
+            "store",
+            "date",
+            "total",
+            "receipt_status",
+            "item_name",
+            "item_quantity",
+            "item_price",
+        ):
+            assert accuracy[field_name] == {
+                "comparable_count": 0,
+                "correct_count": 0,
+                "accuracy_rate": None,
+            }
+
+    run_root = output_root / report["run_id"]
+    ledger_paths = [
+        run_root / "model-01" / "ledger.db",
+        run_root / "model-02" / "ledger.db",
+    ]
+    assert all(path.is_file() for path in ledger_paths)
+    assert len({(path.stat().st_dev, path.stat().st_ino) for path in ledger_paths}) == 2
+    for ledger_path in ledger_paths:
+        with sqlite3.connect(ledger_path) as connection:
+            receipt_rows = connection.execute(
+                "SELECT status FROM receipts ORDER BY id"
+            ).fetchall()
+        assert receipt_rows == [("confirmed",)]
+
+    assert (
+        source_image.read_bytes(),
+        source_image.stat().st_ino,
+        source_image.stat().st_mtime_ns,
+    ) == source_snapshot
+    assert (sentinel.read_bytes(), sentinel.stat().st_mtime_ns) == sentinel_snapshot
+    assert not (data_root / "ledger.db").exists()
+    for forbidden in (
+        private_store,
+        private_item,
+        str(private_total),
+        raw_marker,
+        str(source_root),
+        str(output_root),
+        str(data_root),
+        ".jpeg",
+    ):
+        assert forbidden not in captured.out
+
+
+def test_evaluate_run_keeps_mixed_model_failures_in_safe_json_and_isolated_dbs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root = tmp_path / "evaluation-source"
+    source_root.mkdir()
+    for case_id, color in (("case-0001", "white"), ("case-0002", "gray")):
+        with Image.new("RGB", (120, 80), color) as image:
+            image.save(source_root / f"{case_id}.png")
+
+    data_root = tmp_path / "normal-data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    private_sentinel = "synthetic-sensitive-failure-998877"
+    calls_by_model: dict[str, int] = {}
+
+    def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
+        model = str(kwargs["model"])
+        calls_by_model[model] = calls_by_model.get(model, 0) + 1
+        if calls_by_model[model] == 1:
+            raise OllamaTimeoutError(private_sentinel)
+        return _ollama_payload(receipt_date="2026-07-25")
+
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        fake_request_receipt_extraction,
+    )
+    output_root = tmp_path / "evaluation-output"
+
+    exit_code = cli.run(
+        [
+            "evaluate",
+            "run",
+            str(source_root),
+            "--output-root",
+            str(output_root),
+            "--reference-date",
+            "2026-07-26",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0
+    assert captured.err == ""
+    assert calls_by_model == {"qwen3-vl:8b": 2, "qwen3.5:9b": 2}
+    for model in report["models"]:
+        assert [case["processing_success"] for case in model["cases"]] == [
+            False,
+            True,
+        ]
+        assert [case["status"] for case in model["cases"]] == [
+            "failed",
+            "confirmed",
+        ]
+        assert model["summary"]["processing_success_count"] == 1
+        assert model["summary"]["processing_success_rate"] == 0.5
+        assert model["summary"]["confirmed_rate"] == 0.5
+        assert model["summary"]["failed_rate"] == 0.5
+        assert model["summary"]["error_code_counts"] == {"ollama.timeout": 1}
+
+    run_root = output_root / report["run_id"]
+    for model_index in (1, 2):
+        ledger_path = run_root / f"model-{model_index:02d}" / "ledger.db"
+        with sqlite3.connect(ledger_path) as connection:
+            stored_statuses = connection.execute(
+                "SELECT status FROM receipts ORDER BY id"
+            ).fetchall()
+        assert stored_statuses == [("confirmed",)]
+    for forbidden in (
+        private_sentinel,
+        str(source_root),
+        str(output_root),
+        "998877",
+    ):
+        assert forbidden not in captured.out
+
+
+@pytest.mark.parametrize("dataset_kind", ["missing", "non_anonymous"])
+def test_evaluate_run_rejects_invalid_dataset_with_fixed_private_safe_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dataset_kind: str,
+) -> None:
+    data_root = tmp_path / "normal-data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    private_name = "synthetic-sensitive-shop-998877.jpeg"
+    source_root = tmp_path / "synthetic-sensitive-source"
+    if dataset_kind == "non_anonymous":
+        source_root.mkdir()
+        with Image.new("RGB", (120, 80), "white") as image:
+            image.save(source_root / private_name)
+
+    exit_code = cli.run(
+        [
+            "evaluate",
+            "run",
+            str(source_root),
+            "--output-root",
+            str(tmp_path / "evaluation-output"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == "recebako: error: 評価を安全に実行できませんでした\n"
+    for forbidden in (
+        str(source_root),
+        source_root.name,
+        private_name,
+        "synthetic-sensitive-shop",
+        "998877",
+    ):
+        assert forbidden not in captured.err
+
+
+def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root = tmp_path / "evaluation-source"
+    source_root.mkdir()
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(source_root / "case-0001.png")
+
+    data_root = tmp_path / "normal-data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    private_store = "synthetic-ground-truth-store"
+    private_item = "synthetic-ground-truth-item"
+    private_total = 864_209
+
+    def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
+        return json.dumps(
+            {
+                "store": private_store,
+                "date": "2026-07-25",
+                "time": "09:15",
+                "items": [{"name": private_item, "qty": 2, "price": private_total}],
+                "subtotal": private_total,
+                "tax": 0,
+                "total": private_total,
+                "payment": "cash",
+                "confidence": 0.99,
+            }
+        )
+
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        fake_request_receipt_extraction,
+    )
+    ground_truth_path = tmp_path / "human-ground-truth.csv"
+    ground_truth_path.write_text(
+        "case_id,human_verified,expected_store,expected_date,expected_total,"
+        "expected_status,item_index,expected_item_name,expected_item_qty,"
+        "expected_item_price\n"
+        f"case-0001,true,{private_store},2026-07-25,{private_total},confirmed,"
+        f"0,{private_item},2,{private_total}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.run(
+        [
+            "evaluate",
+            "run",
+            str(source_root),
+            "--output-root",
+            str(tmp_path / "evaluation-output"),
+            "--ground-truth",
+            str(ground_truth_path),
+            "--model",
+            "qwen3-vl:8b",
+            "--reference-date",
+            "2026-07-26",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    accuracy = report["models"][0]["accuracy"]
+    assert exit_code == 0
+    assert captured.err == ""
+    assert accuracy["status"] == "measured"
+    assert accuracy["reason"] is None
+    assert accuracy["verified_case_count"] == 1
+    for field_name in (
+        "store",
+        "date",
+        "total",
+        "receipt_status",
+        "item_name",
+        "item_quantity",
+        "item_price",
+    ):
+        assert accuracy[field_name] == {
+            "comparable_count": 1,
+            "correct_count": 1,
+            "accuracy_rate": 1.0,
+        }
+    for forbidden in (
+        private_store,
+        private_item,
+        str(private_total),
+        str(ground_truth_path),
+        str(source_root),
+    ):
+        assert forbidden not in captured.out

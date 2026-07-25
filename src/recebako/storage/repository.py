@@ -9,6 +9,7 @@ from typing import Any
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
+    ReceiptFileState,
     ReceiptStatus,
     TaxTreatment,
     ValidationIssue,
@@ -26,6 +27,7 @@ class ReceiptWrite:
     ingest_mode: IngestMode
     raw_payload: str
     duplicate_of_id: int | None = None
+    file_state: ReceiptFileState = ReceiptFileState.FINALIZED
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class StoredReceipt:
     confidence: float
     phash: str
     image_path: str
+    file_state: ReceiptFileState
     ingest_mode: IngestMode
     validation_issues: list[dict[str, Any]]
     raw_payload: Any
@@ -121,8 +124,9 @@ class ReceiptRepository:
                 INSERT INTO receipts (
                     store, date_raw, date, time, total, subtotal, tax, payment,
                     category, status, confidence, phash, image_path, ingest_mode,
-                    validation_issues_json, raw_payload_json, duplicate_of_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    validation_issues_json, raw_payload_json, duplicate_of_id,
+                    file_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     *receipt_values[:8],
@@ -135,6 +139,7 @@ class ReceiptRepository:
                     _encode_validation_issues(record.validation.issues),
                     _encode_raw_payload(record.raw_payload),
                     record.duplicate_of_id,
+                    record.file_state.value,
                 ),
             )
             receipt_id = cursor.lastrowid
@@ -207,6 +212,23 @@ class ReceiptRepository:
                 WHERE id = ?
                 """,
                 (validate_image_path(image_path), receipt_id),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError("更新対象のreceiptが見つかりません")
+
+    def finalize_image_path(self, receipt_id: int, image_path: Path) -> None:
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE receipts
+                SET image_path = ?, file_state = ?
+                WHERE id = ?
+                """,
+                (
+                    validate_image_path(image_path),
+                    ReceiptFileState.FINALIZED.value,
+                    receipt_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise sqlite3.DatabaseError("更新対象のreceiptが見つかりません")
@@ -330,6 +352,7 @@ class ReceiptRepository:
             confidence=row["confidence"],
             phash=row["phash"],
             image_path=row["image_path"],
+            file_state=ReceiptFileState(row["file_state"]),
             ingest_mode=IngestMode(row["ingest_mode"]),
             validation_issues=json.loads(row["validation_issues_json"]),
             raw_payload=json.loads(row["raw_payload_json"]),

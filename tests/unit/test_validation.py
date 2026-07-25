@@ -5,10 +5,19 @@ from datetime import date
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 import recebako.normalization.tax as tax_module
 from recebako.domain import IngestMode, ReceiptExtraction, ReceiptStatus
-from recebako.validation import validate_receipt, validate_receipt_payload
+from recebako.normalization import TaxNormalizationReason
+from recebako.validation import (
+    DateNormalizationOutcome,
+    SchemaOutcome,
+    ValidationAudit,
+    validate_receipt,
+    validate_receipt_payload,
+    validate_receipt_payload_with_audit,
+)
 
 REFERENCE_DATE = date(2026, 7, 25)
 
@@ -510,3 +519,158 @@ def test_other_business_rule_violations_are_reported(
 
     assert result.status is ReceiptStatus.REVIEW
     assert expected_code in _issue_codes(receipt)
+
+
+def test_payload_audit_contains_only_safe_outcomes() -> None:
+    raw_receipt = _receipt()
+
+    receipt, result, audit = validate_receipt_payload_with_audit(
+        raw_receipt.model_dump_json(),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is not None
+    assert result.status is ReceiptStatus.CONFIRMED
+    assert audit.schema_outcome is SchemaOutcome.VALID
+    assert audit.date_normalization_outcome is DateNormalizationOutcome.UNCHANGED
+    assert audit.tax_normalization_reason is TaxNormalizationReason.NOT_NEEDED
+    assert set(audit.model_dump()) == {
+        "schema_outcome",
+        "date_normalization_outcome",
+        "tax_normalization_reason",
+    }
+    assert raw_receipt.store not in audit.model_dump_json()
+    assert raw_receipt.items[0].name not in audit.model_dump_json()
+
+
+def test_validation_audit_error_hides_private_extra_values() -> None:
+    private_sentinel = "PRIVATE-RECEIPT-CONTENT"
+    payload = {
+        "schema_outcome": SchemaOutcome.VALID,
+        "date_normalization_outcome": DateNormalizationOutcome.UNCHANGED,
+        "tax_normalization_reason": TaxNormalizationReason.NOT_NEEDED,
+        "store": private_sentinel,
+    }
+
+    with pytest.raises(ValidationError) as captured:
+        ValidationAudit.model_validate(payload)
+
+    assert private_sentinel not in str(captured.value)
+
+
+def test_invalid_structure_audit_marks_later_checks_not_evaluated() -> None:
+    receipt, result, audit = validate_receipt_payload_with_audit(
+        "{not-json",
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is None
+    assert result.status is ReceiptStatus.FAILED
+    assert audit.schema_outcome is SchemaOutcome.INVALID
+    assert audit.date_normalization_outcome is DateNormalizationOutcome.NOT_EVALUATED
+    assert audit.tax_normalization_reason is None
+
+
+@pytest.mark.parametrize(
+    ("raw_date", "expected"),
+    [
+        ("2026-07-25", DateNormalizationOutcome.UNCHANGED),
+        ("2026/7/25", DateNormalizationOutcome.NORMALIZED),
+        ("not-a-date", DateNormalizationOutcome.REJECTED),
+    ],
+)
+def test_payload_audit_reports_date_normalization_outcome(
+    raw_date: str,
+    expected: DateNormalizationOutcome,
+) -> None:
+    _, _, audit = validate_receipt_payload_with_audit(
+        _receipt(date=raw_date).model_dump_json(),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert audit.date_normalization_outcome is expected
+
+
+@pytest.mark.parametrize(
+    ("receipt", "expected"),
+    [
+        (
+            _receipt(
+                items=[
+                    {
+                        "name": "外税商品",
+                        "price": 100,
+                        "price_raw": 100,
+                        "tax_rate": 8,
+                        "tax_treatment": "excluded",
+                    }
+                ],
+                tax_breakdowns=[
+                    {
+                        "tax_rate": 8,
+                        "taxable_amount": 100,
+                        "tax_amount": 8,
+                        "tax_treatment": "excluded",
+                    }
+                ],
+                total=108,
+            ),
+            TaxNormalizationReason.APPLIED,
+        ),
+        (
+            _receipt(
+                items=[
+                    {
+                        "name": "外税商品",
+                        "price": 100,
+                        "price_raw": 100,
+                        "tax_rate": 8,
+                        "tax_treatment": "excluded",
+                    }
+                ],
+                tax_breakdowns=[
+                    {
+                        "tax_rate": 8,
+                        "taxable_amount": 100,
+                        "tax_amount": 8,
+                        "tax_treatment": "excluded",
+                    }
+                ],
+                total=109,
+            ),
+            TaxNormalizationReason.TOTAL_MISMATCH,
+        ),
+    ],
+)
+def test_payload_audit_reports_only_tax_normalization_reason(
+    receipt: ReceiptExtraction,
+    expected: TaxNormalizationReason,
+) -> None:
+    _, _, audit = validate_receipt_payload_with_audit(
+        receipt.model_dump_json(),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert audit.tax_normalization_reason is expected
+
+
+def test_payload_wrapper_preserves_existing_serialized_results() -> None:
+    payload = _receipt(date="2026/7/25").model_dump_json()
+
+    wrapped_receipt, wrapped_validation = validate_receipt_payload(
+        payload,
+        reference_date=REFERENCE_DATE,
+    )
+    audited_receipt, audited_validation, _ = validate_receipt_payload_with_audit(
+        payload,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert wrapped_receipt is not None
+    assert audited_receipt is not None
+    assert wrapped_receipt.model_dump(mode="json") == audited_receipt.model_dump(
+        mode="json"
+    )
+    assert wrapped_validation.model_dump(mode="json") == audited_validation.model_dump(
+        mode="json"
+    )

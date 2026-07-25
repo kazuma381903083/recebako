@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -9,10 +10,23 @@ from typing import Any
 import pytest
 from PIL import Image
 
+import recebako.runtime.inbox as inbox_module
 from recebako.ai import OllamaTimeoutError
 from recebako.config import AppConfig
-from recebako.domain import IngestMode, ReceiptStatus
-from recebako.runtime import run_inbox
+from recebako.domain import IngestMode, ReceiptFileState, ReceiptStatus
+from recebako.runtime import (
+    RuntimeFileError,
+    claim_inbox_file,
+    initialize_runtime,
+    run_inbox,
+    scan_inbox,
+)
+from recebako.storage import (
+    ReceiptRepository,
+    ReceiptWrite,
+    connect_database,
+)
+from recebako.validation import validate_receipt_payload
 
 REFERENCE_DATE = date(2026, 7, 26)
 
@@ -71,6 +85,136 @@ def test_run_inbox_with_no_files_is_successful(tmp_path: Path) -> None:
     assert result.results == []
 
 
+def test_run_inbox_automatically_retries_unregistered_processing_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    paths, _ = initialize_runtime(data_root)
+    _write_image(paths.inbox / "receipt.jpg")
+    claim_inbox_file(
+        scan_inbox(paths).selected[0],
+        paths,
+        token="a" * 32,
+    )
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _payload(),
+    )
+
+    result = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.confirmed == 1
+    assert result.failed == 0
+    assert list(paths.processing.iterdir()) == []
+    assert (paths.archive / "2026" / "07" / "1_receipt.jpg").is_file()
+
+
+def test_run_inbox_automatically_finalizes_pending_database_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    paths, _ = initialize_runtime(data_root)
+    _write_image(paths.inbox / "receipt.jpg")
+    work_path = claim_inbox_file(
+        scan_inbox(paths).selected[0],
+        paths,
+        token="a" * 32,
+    )
+    extraction, validation = validate_receipt_payload(
+        _payload(),
+        reference_date=REFERENCE_DATE,
+        mode=IngestMode.REGULAR,
+    )
+    assert extraction is not None
+    with closing(connect_database(data_root)) as connection:
+        receipt_id = ReceiptRepository(connection).save(
+            ReceiptWrite(
+                extraction=extraction,
+                validation=validation,
+                phash="0000000000000000",
+                image_path=Path("processing") / work_path.name,
+                ingest_mode=IngestMode.REGULAR,
+                raw_payload=_payload(),
+                file_state=ReceiptFileState.PENDING,
+            )
+        )
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: pytest.fail("pending record must not be re-extracted"),
+    )
+
+    result = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.processed == 0
+    with closing(connect_database(data_root)) as connection:
+        stored = ReceiptRepository(connection).get(receipt_id)
+    assert stored is not None
+    assert stored.file_state is ReceiptFileState.FINALIZED
+    assert stored.image_path == "archive/2026/07/1_receipt.jpg"
+    assert (data_root / stored.image_path).is_file()
+    assert list(paths.processing.iterdir()) == []
+
+
+def test_run_inbox_transition_failure_is_pending_until_next_run_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    paths, _ = initialize_runtime(data_root)
+    _write_image(paths.inbox / "receipt.jpg")
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _payload(),
+    )
+    original_move_to_final = inbox_module.move_to_final
+
+    def fail_final_move(*args: Any, **kwargs: Any) -> Path:
+        raise RuntimeFileError("forced final move failure")
+
+    monkeypatch.setattr(inbox_module, "move_to_final", fail_final_move)
+
+    failed_run = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert failed_run.failed == 1
+    with closing(connect_database(data_root)) as connection:
+        pending = ReceiptRepository(connection).get(1)
+    assert pending is not None
+    assert pending.status is ReceiptStatus.CONFIRMED
+    assert pending.file_state is ReceiptFileState.PENDING
+    assert pending.image_path.startswith("processing/")
+    assert (data_root / pending.image_path).is_file()
+
+    monkeypatch.setattr(inbox_module, "move_to_final", original_move_to_final)
+    recovered_run = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert recovered_run.processed == 0
+    with closing(connect_database(data_root)) as connection:
+        finalized = ReceiptRepository(connection).get(1)
+    assert finalized is not None
+    assert finalized.file_state is ReceiptFileState.FINALIZED
+    assert finalized.image_path == "archive/2026/07/1_receipt.jpg"
+    assert (data_root / finalized.image_path).is_file()
+    assert list(paths.processing.iterdir()) == []
+
+
 def test_run_inbox_confirms_archives_and_saves_relative_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -122,9 +266,9 @@ def test_run_inbox_confirms_archives_and_saves_relative_path(
     assert temporary_paths and all(not path.exists() for path in temporary_paths)
     with sqlite3.connect(data_root / "ledger.db") as connection:
         image_path = connection.execute(
-            "SELECT image_path FROM receipts WHERE id = 1"
+            "SELECT image_path, file_state FROM receipts WHERE id = 1"
         ).fetchone()
-    assert image_path == ("archive/2026/07/1_receipt.jpg",)
+    assert image_path == ("archive/2026/07/1_receipt.jpg", "finalized")
 
 
 def test_run_inbox_routes_duplicate_to_review(

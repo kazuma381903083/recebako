@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 PaymentMethod = Literal["cash", "credit", "qr", "emoney", "unknown"]
 
 
+class ReceiptFileState(str, Enum):
+    PENDING = "pending"
+    FINALIZED = "finalized"
+
+
 class TaxTreatment(str, Enum):
     INCLUDED = "included"
     EXCLUDED = "excluded"

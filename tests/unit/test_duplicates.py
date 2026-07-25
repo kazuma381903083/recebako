@@ -9,6 +9,7 @@ import pytest
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
+    ReceiptFileState,
     ReceiptStatus,
     ValidationResult,
 )
@@ -60,6 +61,7 @@ def _save(
     phash: str,
     status: ReceiptStatus = ReceiptStatus.CONFIRMED,
     duplicate_of_id: int | None = None,
+    file_state: ReceiptFileState = ReceiptFileState.FINALIZED,
 ) -> int:
     return ReceiptRepository(connection).save(
         ReceiptWrite(
@@ -70,6 +72,7 @@ def _save(
             ingest_mode=IngestMode.REGULAR,
             raw_payload=extraction.model_dump_json(),
             duplicate_of_id=duplicate_of_id,
+            file_state=file_state,
         )
     )
 
@@ -213,3 +216,36 @@ def test_candidate_priority_is_identity_then_distance_then_id(
         far_identity_id,
         same_distance_later_id,
     }
+
+
+def test_pending_receipt_is_ignored_until_file_is_finalized(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    receipt = _extraction()
+    pending_id = _save(
+        connection,
+        tmp_path,
+        receipt,
+        phash="0000000000000000",
+        file_state=ReceiptFileState.PENDING,
+    )
+
+    pending_candidate = find_duplicate_candidate(
+        connection,
+        receipt,
+        phash="0000000000000000",
+    )
+    ReceiptRepository(connection).finalize_image_path(
+        pending_id,
+        Path("archive/2026/07/finalized.jpg"),
+    )
+    finalized_candidate = find_duplicate_candidate(
+        connection,
+        receipt,
+        phash="0000000000000000",
+    )
+
+    assert pending_candidate is None
+    assert finalized_candidate is not None
+    assert finalized_candidate.receipt_id == pending_id

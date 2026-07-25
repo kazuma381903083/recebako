@@ -11,6 +11,7 @@ from recebako.config import AppConfig
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
+    ReceiptFileState,
     ReceiptStatus,
     ValidationResult,
 )
@@ -103,6 +104,7 @@ def _save_processing_record(
                 image_path=Path("processing") / work_path.name,
                 ingest_mode=IngestMode.REGULAR,
                 raw_payload="{}",
+                file_state=ReceiptFileState.PENDING,
             )
         )
 
@@ -242,6 +244,99 @@ def test_recover_dry_run_changes_neither_file_nor_database(
     assert not (data_root / "review" / "1_receipt.jpg").exists()
     assert _stored_path(data_root, receipt_id).startswith("processing/")
     assert (data_root / ".recebako-inbox.lock").read_bytes() == before_lock_bytes
+
+
+def test_recover_dry_run_does_not_create_missing_archive_directories(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    work_path = _claim(data_root)
+    receipt_id = _save_processing_record(
+        data_root,
+        work_path,
+        status=ReceiptStatus.CONFIRMED,
+    )
+    archive_year = data_root / "archive" / "2026"
+    original_db_path = _stored_path(data_root, receipt_id)
+
+    result = recover_runtime(
+        config=_config(data_root),
+        fallback_date=REFERENCE_DATE,
+        dry_run=True,
+    )
+
+    assert result.recovered == 1
+    assert result.errors == 0
+    assert result.results[0].outcome == "planned"
+    assert result.results[0].destination == "archive/2026/07/1_receipt.jpg"
+    assert work_path.is_file()
+    assert not archive_year.exists()
+    assert _stored_path(data_root, receipt_id) == original_db_path
+
+
+@pytest.mark.parametrize("symlink_component", ["year", "month"])
+def test_recover_dry_run_rejects_nested_archive_symlink_without_mutation(
+    tmp_path: Path,
+    symlink_component: str,
+) -> None:
+    data_root = tmp_path / "data"
+    work_path = _claim(data_root)
+    receipt_id = _save_processing_record(
+        data_root,
+        work_path,
+        status=ReceiptStatus.CONFIRMED,
+    )
+    archive_year = data_root / "archive" / "2026"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if symlink_component == "year":
+        archive_year.symlink_to(outside, target_is_directory=True)
+        nested_symlink = archive_year
+    else:
+        archive_year.mkdir()
+        nested_symlink = archive_year / "07"
+        nested_symlink.symlink_to(outside, target_is_directory=True)
+    original_db_path = _stored_path(data_root, receipt_id)
+
+    result = recover_runtime(
+        config=_config(data_root),
+        fallback_date=REFERENCE_DATE,
+        dry_run=True,
+    )
+
+    assert result.recovered == 0
+    assert result.errors == 1
+    assert result.results[0].outcome == "error"
+    assert result.results[0].error_code == "recovery.invalid_transition"
+    assert result.results[0].destination is None
+    assert work_path.is_file()
+    assert nested_symlink.is_symlink()
+    assert list(outside.iterdir()) == []
+    assert _stored_path(data_root, receipt_id) == original_db_path
+
+
+def test_recover_dry_run_converts_invalid_image_path_to_item_error(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    work_path = _claim(
+        data_root,
+        source_name="unsafe\\receipt.jpg",
+    )
+
+    result = recover_runtime(
+        config=_config(data_root),
+        fallback_date=REFERENCE_DATE,
+        dry_run=True,
+    )
+
+    assert result.recovered == 0
+    assert result.errors == 1
+    assert result.results[0].outcome == "error"
+    assert result.results[0].error_code == "recovery.invalid_transition"
+    assert result.results[0].source == "processing"
+    assert result.results[0].destination is None
+    assert work_path.is_file()
 
 
 def test_recover_does_not_change_ambiguous_final_files(
