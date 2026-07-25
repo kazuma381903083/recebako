@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from recebako!")
+from recebako.cli import main
+
+__all__ = ["main"]
