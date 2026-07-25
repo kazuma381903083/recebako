@@ -1,0 +1,34 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS / VS Code
+.DS_Store
+.vscode/settings.json
+
+# Local configuration
+.env
+config.local.toml
+
+# Runtime data
+var/
+runtime/
+recebako-data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Private receipt datasets
+tests/private_golden/
+tests/fixtures/private/
+
+# Generated artifacts
+dist/
+build/

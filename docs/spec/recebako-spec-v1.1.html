@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>レシート全自動家計簿「recebako」仕様書 v1.1 — Pixel 8a × ローカルLLM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F4F3;
+  --ink:#22303A;
+  --ink-soft:#5C6B72;
+  --line:#C8D2D2;
+  --navy:#1F3A5F;       /* 帳簿ネイビー */
+  --navy-bg:#E8EEF6;
+  --green:#2F7D4F;      /* ローカル=緑(シリーズ共通) */
+  --green-bg:#E7F2EA;
+  --red:#C0392B;        /* 承認印・警告 */
+  --amber:#8A5A00;
+  --amber-bg:#FBF3DC;
+  --panel:#1A222A;
+  --panel-txt:#D6E0E4;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:'Zen Kaku Gothic New',sans-serif;color:var(--ink);background:var(--bg);line-height:1.8;font-size:15px}
+.wrap{max-width:940px;margin:0 auto;padding:0 20px 80px}
+.mono{font-family:'IBM Plex Mono',monospace}
+
+/* ===== 表紙(仕様書表書き) ===== */
+.cover{background:#fff;border:2px solid var(--ink);margin:36px 0 46px;box-shadow:6px 6px 0 rgba(34,48,58,.12)}
+.cover-head{display:flex;justify-content:space-between;border-bottom:2px solid var(--ink);padding:9px 18px;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.12em;color:var(--ink-soft)}
+.cover-body{padding:32px 26px 24px;position:relative}
+.cover h1{font-size:clamp(23px,4.8vw,34px);font-weight:900;line-height:1.45}
+.cover h1 .sub{display:block;font-size:.44em;font-weight:600;color:var(--navy);letter-spacing:.18em;margin-bottom:8px}
+.cover p.lead{margin-top:12px;color:var(--ink-soft);font-size:14px;max-width:640px}
+.cover-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));border-top:1px solid var(--line);margin-top:22px;padding-top:12px;gap:6px 20px;font-size:12px}
+.cover-meta .k{color:var(--ink-soft);font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.1em}
+.cover-meta .v{font-weight:700}
+.hanko{position:absolute;right:24px;top:24px;width:70px;height:70px;border:3px solid var(--red);border-radius:50%;color:var(--red);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;transform:rotate(-10deg);opacity:.85;line-height:1.3;text-align:center}
+
+/* ===== 目次 ===== */
+.toc{background:#fff;border:1px solid var(--line);padding:18px 22px;margin-bottom:50px}
+.toc-title{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.2em;color:var(--ink-soft);margin-bottom:10px}
+.toc ol{list-style:none;columns:2;column-gap:30px}
+.toc li{margin-bottom:5px;break-inside:avoid}
+.toc a{color:var(--ink);text-decoration:none;font-size:13px;display:flex;gap:9px;align-items:baseline}
+.toc a:hover .t{color:var(--navy);text-decoration:underline}
+.toc .num{font-family:'IBM Plex Mono',monospace;color:var(--red);font-size:10.5px;font-weight:600}
+@media(max-width:620px){.toc ol{columns:1}}
+
+section{margin-bottom:64px}
+.sec-head{margin-bottom:22px;border-bottom:3px solid var(--ink);padding-bottom:9px;display:flex;align-items:baseline;gap:13px;flex-wrap:wrap}
+.sec-head .no{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:#fff;background:var(--navy);padding:3px 10px;letter-spacing:.12em}
+.sec-head h2{font-size:20px;font-weight:900}
+h3{font-size:15.5px;font-weight:700;margin:26px 0 10px}
+h3 .hn{color:var(--navy);font-family:'IBM Plex Mono',monospace;font-size:12.5px;margin-right:8px}
+p{margin-bottom:12px}
+p.note{color:var(--ink-soft);font-size:13px}
+em{font-style:normal;background:linear-gradient(transparent 66%, #F1E2B8 66%)}
+strong{font-weight:700}
+
+table{width:100%;border-collapse:collapse;margin:14px 0 18px;background:#fff;font-size:13px}
+th{background:var(--ink);color:#fff;padding:8px 10px;text-align:left;font-weight:500;white-space:nowrap}
+td{border:1px solid var(--line);padding:8px 10px;vertical-align:top}
+tr:nth-child(even) td{background:#F7FAF8}
+td.c,th.c{text-align:center}
+.tbl-scroll{overflow-x:auto;margin:14px 0 18px}
+.tbl-scroll table{margin:0;min-width:640px}
+td .ok{color:var(--green);font-weight:700}
+td .ng{color:var(--red);font-weight:700}
+
+pre{background:var(--panel);color:var(--panel-txt);font-family:'IBM Plex Mono',monospace;font-size:12.5px;line-height:1.7;padding:16px 18px;margin:14px 0 18px;overflow-x:auto;border-radius:4px}
+pre .cm{color:#7B8E96} pre .pr{color:#7CE3C4} pre .fl{color:#F0B45A}
+pre .out{color:#A9BCC4} pre .hi{color:#FF9E80;font-weight:600} pre .k{color:#9CD67F}
+code{font-family:'IBM Plex Mono',monospace;font-size:.9em;background:#E3E9E7;padding:1px 6px;border-radius:3px}
+
+.callout{background:#fff;border:1.5px solid var(--ink);border-left:6px solid var(--navy);padding:13px 17px;margin:16px 0;font-size:14px}
+.callout.red{border-left-color:var(--red)}
+.callout.green{border-left-color:var(--green)}
+.beginner{background:var(--navy-bg);border:1px dashed var(--navy);padding:11px 15px;margin:14px 0;font-size:13px}
+.beginner::before{content:"📖 初心者メモ　";font-weight:900;color:var(--navy)}
+ul.plain{margin:0 0 14px 20px}
+ul.plain li{margin-bottom:7px}
+ol.steps{margin:0 0 14px 22px}
+ol.steps li{margin-bottom:8px}
+
+/* ===== レシート風カード(シグネチャ) ===== */
+.receipt{
+  background:#fff;max-width:430px;margin:18px auto;padding:18px 20px 14px;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.9;color:#333;
+  border-left:1px solid var(--line);border-right:1px solid var(--line);
+  position:relative;
+  box-shadow:0 4px 14px rgba(34,48,58,.12);
+}
+.receipt::before,.receipt::after{
+  content:"";position:absolute;left:0;right:0;height:10px;
+  background:radial-gradient(circle at 5px -3px, transparent 6px, #fff 6px);
+  background-size:12px 10px;background-position:0 0;
+}
+.receipt::before{top:-9px;transform:rotate(180deg)}
+.receipt::after{bottom:-9px}
+.receipt .r-head{text-align:center;font-weight:600;border-bottom:1px dashed #999;padding-bottom:6px;margin-bottom:8px}
+.receipt .r-row{display:flex;justify-content:space-between}
+.receipt .r-total{border-top:1px dashed #999;margin-top:8px;padding-top:6px;font-weight:600;display:flex;justify-content:space-between}
+.receipt .r-note{font-size:10px;color:#888;text-align:center;margin-top:8px}
+
+/* ===== フロー図 ===== */
+.flow{background:#fff;border:1.5px solid var(--ink);padding:20px 16px;margin:18px 0;overflow-x:auto}
+.flow-row{display:flex;align-items:stretch;min-width:680px;margin-bottom:6px}
+.f-node{flex:1;border:2px solid var(--ink);padding:8px 8px;text-align:center;font-size:11.5px;font-weight:700;display:flex;flex-direction:column;justify-content:center;background:#fff}
+.f-node .sub{font-family:'IBM Plex Mono',monospace;font-size:9.5px;font-weight:400;color:var(--ink-soft);margin-top:3px}
+.f-node.phone{background:var(--navy-bg)}
+.f-node.mac{background:var(--green-bg)}
+.f-arr{display:flex;align-items:center;padding:0 6px;font-family:'IBM Plex Mono',monospace;color:var(--ink-soft);font-size:14px}
+.flow-note{font-size:11.5px;color:var(--ink-soft);margin-top:8px;font-family:'IBM Plex Mono',monospace}
+.boundary{border:2px dashed var(--red);padding:4px 8px;margin-top:10px;font-size:11px;color:var(--red);font-weight:700;display:inline-block}
+
+footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:var(--ink-soft);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em}
+@media(max-width:560px){.hanko{width:58px;height:58px;font-size:13px;right:14px;top:14px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ================= 表紙 ================= -->
+<div class="cover">
+  <div class="cover-head"><span>SYSTEM SPECIFICATION</span><span>DOC: RCB-SPEC-001 / REV 1.1</span></div>
+  <div class="cover-body">
+    <div class="hanko">仕様<br>確定</div>
+    <h1><span class="sub">RECEIPT AUTO-LEDGER SYSTEM</span>レシート全自動家計簿「recebako（レセ箱）」<br>システム仕様書</h1>
+    <p class="lead">Pixel 8aで撮ったレシートが、何もしなくてもMacの中で家計簿になる。画像も購買履歴も<strong>1バイトも外部クラウドに出さない</strong>完全ローカル構成。品質・セキュリティ・性能・ライセンスの4観点を検討済みの、そのまま実装に入れる仕様書。</p>
+    <div class="cover-meta">
+      <div><div class="k">SYSTEM</div><div class="v">recebako v1.1</div></div>
+      <div><div class="k">CLIENT</div><div class="v">Google Pixel 8a</div></div>
+      <div><div class="k">SERVER</div><div class="v">Mac (M1 / 32GB)</div></div>
+      <div><div class="k">AI CORE</div><div class="v">Qwen3-VL 8B (ローカル)</div></div>
+      <div><div class="k">作成日</div><div class="v">2026-07-25</div></div>
+      <div><div class="k">読者</div><div class="v">ローカルLLMアプリ初挑戦の開発者</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 目次 ================= -->
+<nav class="toc">
+  <div class="toc-title">CONTENTS</div>
+  <ol>
+    <li><a href="#s1"><span class="num">01</span><span class="t">概要（目的・スコープ・前提）</span></a></li>
+    <li><a href="#s2"><span class="num">02</span><span class="t">最重要の設計判断：画像の取り込み経路</span></a></li>
+    <li><a href="#s3"><span class="num">03</span><span class="t">全体アーキテクチャ</span></a></li>
+    <li><a href="#s4"><span class="num">04</span><span class="t">機能要件（FR）</span></a></li>
+    <li><a href="#s5"><span class="num">05</span><span class="t">データ設計（スキーマ・DB・状態遷移）</span></a></li>
+    <li><a href="#s6"><span class="num">06</span><span class="t">AI処理設計（プロンプト・検証・分類）</span></a></li>
+    <li><a href="#s7"><span class="num">07</span><span class="t">非機能要件（性能・品質・セキュリティ）</span></a></li>
+    <li><a href="#s8"><span class="num">08</span><span class="t">技術選定とライセンス</span></a></li>
+    <li><a href="#s9"><span class="num">09</span><span class="t">テスト計画と受入基準</span></a></li>
+    <li><a href="#s10"><span class="num">10</span><span class="t">開発ロードマップ</span></a></li>
+    <li><a href="#s11"><span class="num">11</span><span class="t">リスクと対策</span></a></li>
+    <li><a href="#s12"><span class="num">12</span><span class="t">用語集</span></a></li>
+  </ol>
+</nav>
+
+<!-- ================= 01 概要 ================= -->
+<section id="s1">
+  <div class="sec-head"><span class="no">01</span><h2>概要</h2></div>
+  <h3><span class="hn">1-1</span>目的</h3>
+  <p>レシートを<strong>「撮るだけ」</strong>で家計簿が完成する仕組みを作る。手入力・手動アップロード・費目の手選択を全廃し、月次の支出レポートまで全自動で生成する。同時に、VLM（画像が読めるLLM）＋構造化出力という2026年の中核技術を、実際に毎日動くシステムを通して習得する。</p>
+  <h3><span class="hn">1-2</span>ゴールのイメージ</h3>
+  <div class="receipt">
+    <div class="r-head">recebako 月次レポート 2026/08</div>
+    <div class="r-row"><span>食費</span><span>¥42,310 (52%)</span></div>
+    <div class="r-row"><span>外食</span><span>¥18,900 (23%)</span></div>
+    <div class="r-row"><span>日用品</span><span>¥9,840 (12%)</span></div>
+    <div class="r-row"><span>交通</span><span>¥6,200 ( 8%)</span></div>
+    <div class="r-row"><span>その他</span><span>¥4,120 ( 5%)</span></div>
+    <div class="r-total"><span>合計 (レシート41枚)</span><span>¥81,370</span></div>
+    <div class="r-note">** ラーメン支出 前月比 +2,400円。原因: 二郎系2回 **<br>** ALL PROCESSED LOCALLY — NO CLOUD **</div>
+  </div>
+  <h3><span class="hn">1-3</span>スコープ / 非スコープ</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:90px" class="c">区分</th><th>内容</th></tr>
+    <tr><td class="c"><span class="ok">対象</span></td><td>紙レシートの撮影画像の取り込み・情報抽出・費目分類・蓄積・月次レポート・修正用レビュー・検索</td></tr>
+    <tr><td class="c"><span class="ng">対象外<br>(v1)</span></td><td>電子レシート/メール明細の取込、クレカ明細CSV連携、銀行API連携、複数ユーザー同時利用、確定申告用出力。<em>いずれもv2以降の拡張候補として設計上の拡張点だけ確保する</em></td></tr>
+  </table></div>
+  <h3><span class="hn">1-4</span>前提環境</h3>
+  <ul class="plain">
+    <li><strong>撮影端末：</strong>Google Pixel 8a（Googleフォトでカメラ写真を自動バックアップ中）</li>
+    <li><strong>処理サーバ：</strong>Apple M1 Pro/Max・メモリ32GB・Ollama導入済み・常時起動でなくてもよい（起動時にまとめて処理する設計とする）</li>
+    <li><strong>ネットワーク：</strong>自宅Wi-Fi。スマホ⇄Mac間はLAN内通信を基本とする</li>
+  </ul>
+</section>
+
+<!-- ================= 02 取り込み経路 ================= -->
+<section id="s2">
+  <div class="sec-head"><span class="no">02</span><h2>最重要の設計判断 — 画像をどうやってMacに運ぶか</h2></div>
+  <p>本システムで最初に決めるべき最大の論点。「Googleフォトを使ってるからGoogleフォトのAPIで取ればいい」と考えたくなるが、<strong>2025年の仕様変更でその道はほぼ塞がれている</strong>。</p>
+  <div class="callout red"><b>前提となる事実（2025年3月31日発効）：</b>Google Photos Library APIから <code>photoslibrary.readonly</code> 等のスコープが削除され、<strong>アプリはユーザーのライブラリ全体を読めなくなった</strong>（読めるのは自アプリが作成した写真のみ。旧スコープでの呼び出しは403）。全体からの取得は、ユーザーがその都度手で写真を選ぶ「Picker API」に置き換えられた。つまり<em>「Googleフォトに上がった新着レシートを自動で吸い出す」個人アプリは公式には作れない</em>。</div>
+  <h3><span class="hn">2-1</span>3案の比較検討</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:150px">案</th><th>仕組み</th><th class="c">自動化</th><th class="c">セキュリティ</th><th class="c">実装難度</th><th>評価</th></tr>
+    <tr><td><strong>A. Google Photos<br>Picker API</strong></td><td>OAuth＋セッション作成→ユーザーがフォトアプリで選択→アプリが取得</td><td class="c"><span class="ng">✕ 毎回手動選択</span></td><td class="c">△ Google経由</td><td class="c">高(OAuth/ポーリング)</td><td>「撮るだけ」の目的に反する。不採用</td></tr>
+    <tr><td><strong>B. Google Takeout</strong></td><td>ライブラリ一括エクスポートをDL</td><td class="c"><span class="ng">✕ バッチのみ</span></td><td class="c">△</td><td class="c">低</td><td>過去レシートの初期移行<strong>専用</strong>で採用</td></tr>
+    <tr><td><strong>C. Syncthing<br>直接同期</strong></td><td>Pixel⇄MacをP2Pで直結し、専用フォルダをリアルタイム同期。クラウドを一切経由しない</td><td class="c"><span class="ok">◎ 完全自動</span></td><td class="c"><span class="ok">◎ LAN内完結</span></td><td class="c">低</td><td><strong>◎ 本採用</strong></td></tr>
+  </table></div>
+  <div class="beginner"><strong>Syncthing</strong>はOSSのファイル同期ツール（Dropboxのサーバ無し版）。端末同士が直接暗号化通信（TLS）でフォルダを同期する。AndroidアプリとMac版を入れ、互いの「デバイスID」を承認し合うだけで動く。サーバも登録も不要。</div>
+  <h3><span class="hn">2-2</span>採用構成と運用ルール</h3>
+  <ol class="steps">
+    <li>Pixel側に <code>Receipts/</code> フォルダを作り、Syncthingで Mac の <code>~/recebako/inbox/</code> と同期する（送信専用設定）。</li>
+    <li>レシートは標準カメラで撮影 → 共有メニューから <code>Receipts/</code> へ保存（1タップ）。慣れたら「カメラ→共有→Receipts」がレジ前の3秒作業になる。</li>
+    <li><strong>Googleフォトのバックアップ対象に <code>Receipts/</code> を含めない</strong>（フォトの設定で該当フォルダのバックアップをOFF）。これにより<em>レシート画像はGoogleのクラウドに一切上がらない</em>。購買履歴という機微データの露出面を構造的に消す。</li>
+    <li>通常のカメラフォルダで撮ってしまった分は、月次でTakeout経由 or 手動move（救済経路）。</li>
+  </ol>
+  <div class="callout green"><b>この判断の意味：</b>「Googleフォト対応」を<em>“Googleフォトと共存しつつ、レシートだけはその外側で完全ローカルに流す”</em>と定義し直した。普段の写真は今まで通りGoogleフォトへ、レシートはSyncthingでMac直行。APIの制約回避とセキュリティ向上が同じ一手で達成できる。</div>
+</section>
+
+<!-- ================= 03 アーキテクチャ ================= -->
+<section id="s3">
+  <div class="sec-head"><span class="no">03</span><h2>全体アーキテクチャ</h2></div>
+  <div class="flow">
+    <div class="flow-row">
+      <div class="f-node phone">📱 Pixel 8a<div class="sub">撮影 → Receipts/へ保存</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node phone">Syncthing<div class="sub">P2P・TLS・LAN内同期</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">inbox/<div class="sub">Mac着信フォルダ</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">watcher<div class="sub">launchdで監視・起動</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">前処理<div class="sub">回転補正・縮小・pHash</div></div>
+    </div>
+    <div class="flow-row">
+      <div class="f-node mac">VLM抽出<div class="sub">Qwen3-VL 8B @ Ollama<br>JSONスキーマ強制</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">検証<div class="sub">合計整合・重複・三値判定</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">SQLite<div class="sub">帳簿DB(単一ファイル)</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">レポート<div class="sub">月次HTML自動生成</div></div>
+      <div class="f-arr">→</div>
+      <div class="f-node mac">レビューUI<div class="sub">要確認分だけ人間が修正</div></div>
+    </div>
+    <div class="flow-note">全処理はMac内で完結。外部への通信はSyncthingのLAN内P2Pのみ。</div>
+    <div class="boundary">セキュリティ境界：この線の外（インターネット）にレシート画像・購買データは出ない</div>
+  </div>
+  <p>構成要素は「同期(Syncthing)」「監視と前処理(Python)」「抽出(Ollama+VLM)」「検証と蓄積(Python+SQLite)」「表示(静的HTML)」の5つだけ。<em>Webサーバもクラウドも常駐DBも不要</em>。全部が1台のMacのファイルとプロセスで完結する、初心者が全体を見渡せる最小構成を意図している。</p>
+</section>
+
+<!-- ================= 04 機能要件 ================= -->
+<section id="s4">
+  <div class="sec-head"><span class="no">04</span><h2>機能要件（FR）</h2></div>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:80px" class="c">ID</th><th style="width:120px">機能</th><th>要件</th><th class="c" style="width:70px">優先度</th></tr>
+    <tr><td class="c mono">FR-01</td><td>画像取込</td><td>inbox/に到着したJPEG/PNG/HEICを自動検知し処理を開始する。Mac起動時に未処理分をまとめて処理する（常時起動を前提としない）</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-02</td><td>前処理</td><td>EXIFに基づく回転補正、長辺2048pxへの縮小、知覚ハッシュ(pHash)の算出を行う</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-03</td><td>情報抽出</td><td>VLMにより店名・日付・時刻・品目(名称/単価/数量/金額)・小計・税・合計・支払方法を定義済みJSONスキーマで抽出する</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-04</td><td>検証</td><td>品目合計と合計金額の整合(±2円)、日付の妥当性、pHashと(店名,日付,合計)による重複検出を行い、結果を「確定/要確認/失敗」の三値で判定する</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-05</td><td>費目分類</td><td>店名マスタと品目名からLLMが費目(食費/外食/日用品/交通/趣味/医療/その他)を付与する。ユーザーの修正結果を店名マスタに学習反映する</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-06</td><td>蓄積</td><td>抽出結果と原画像パスをSQLiteに保存する。元画像は撮影年月別フォルダへ移動し原本として保全する</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-07</td><td>月次レポート</td><td>月初に自己完結HTML（外部CDN・JS依存なし、SVG描画）を自動生成する。含む内容：(a)月間合計・前月比・レシート枚数・日平均のKPI (b)<strong>日別出費推移の費目積み上げグラフ</strong>（土日識別・最高支出日の注記付き） (c)費目別サマリ（前月比付き） (d)<strong>費目内の品目別集計</strong>（正規化名で回数・合計・平均単価、費目ごとにTOP表示） (e)店舗別ランキング (f)ローカルLLMによる所感コメント</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-08</td><td>レビューUI</td><td>「要確認」判定のレシートを原画像と抽出結果の並記で表示し、修正・確定できるローカルWeb画面を提供する</td><td class="c">必須</td></tr>
+    <tr><td class="c mono">FR-09</td><td>検索</td><td>「先月のコンビニ支出」「二郎 いくら使った」等を期間・店名・費目・品目名で検索できる(CLIで可)</td><td class="c">推奨</td></tr>
+    <tr><td class="c mono">FR-10</td><td>初期移行</td><td>Google Takeoutで取得した過去のレシート画像フォルダを一括投入できる</td><td class="c">任意</td></tr>
+  </table></div>
+</section>
+
+<!-- ================= 05 データ設計 ================= -->
+<section id="s5">
+  <div class="sec-head"><span class="no">05</span><h2>データ設計</h2></div>
+  <h3><span class="hn">5-1</span>抽出JSONスキーマ — システムの心臓部</h3>
+  <p>VLMの出力をこのスキーマに<strong>強制</strong>する（Ollamaの<code>format</code>パラメータに渡す）。自由文を一切許さないことで後段が壊れなくなる。</p>
+<pre><span class="out">{
+  "type": "object",
+  "required": ["store", "date", "total", "items", "confidence"],
+  "properties": {
+    "store":      {"type": "string",  "description": "店名。読めなければ空文字"},
+    "date":       {"type": "string",  "description": "YYYY-MM-DD。読めなければ空文字"},
+    "time":       {"type": "string"},
+    "items": {
+      "type": "array",
+      "items": {"type": "object",
+        "required": ["name", "price"],
+        "properties": {
+          "name":  {"type": "string"},
+          "qty":   {"type": "integer", "default": 1},
+          "price": {"type": "integer", "description": "円・税込の行合計"}}}
+    },
+    "subtotal":   {"type": "integer"},
+    "tax":        {"type": "integer"},
+    "total":      {"type": "integer", "description": "レシート記載の合計金額"},
+    "payment":    {"type": "string",  "enum": ["cash","credit","qr","emoney","unknown"]},
+    "confidence": {"type": "number",  "description": "読み取り自信度 0.0-1.0"}
+  }
+}</span></pre>
+  <div class="beginner">「読めない項目は<strong>空文字や0で埋めさせる</strong>」のがコツ。無理に埋めさせると幻覚（それっぽい嘘）が混入する。<code>confidence</code>を自己申告させ、低いものは要確認行きにする。</div>
+  <h3><span class="hn">5-2</span>SQLiteテーブル定義</h3>
+<pre><span class="k">CREATE TABLE</span> receipts (
+  id          INTEGER PRIMARY KEY,
+  store       TEXT, date TEXT, time TEXT,
+  total       INTEGER, subtotal INTEGER, tax INTEGER,
+  payment     TEXT,
+  category    TEXT,                  <span class="cm">-- 費目(レシート単位の主費目)</span>
+  status      TEXT NOT NULL,         <span class="cm">-- confirmed / review / failed</span>
+  confidence  REAL,
+  phash       TEXT,                  <span class="cm">-- 重複検出用</span>
+  image_path  TEXT NOT NULL,         <span class="cm">-- 原本画像への相対パス</span>
+  created_at  TEXT DEFAULT (datetime('now','localtime'))
+);
+<span class="k">CREATE TABLE</span> items (
+  id INTEGER PRIMARY KEY, receipt_id INTEGER REFERENCES receipts(id),
+  name TEXT,                       <span class="cm">-- レシート記載の生の品目名(原本保持)</span>
+  name_norm TEXT,                  <span class="cm">-- 正規化名(「ｷｬﾍﾞﾂ1/2」→「キャベツ」)。品目集計はこちらで行う</span>
+  qty INTEGER, price INTEGER, category TEXT
+);
+<span class="k">CREATE TABLE</span> store_master (      <span class="cm">-- 店名→費目の学習マスタ(修正が溜まるほど賢くなる)</span>
+  store_pattern TEXT PRIMARY KEY, category TEXT, updated_at TEXT
+);</pre>
+  <h3><span class="hn">5-3</span>フォルダ構成と状態遷移</h3>
+<pre><span class="out">~/recebako/
+├── inbox/          ← Syncthing着信(未処理)
+├── processing/     ← 処理中(クラッシュ時の再開判定に使う)
+├── archive/2026/08/ ← 処理済み原本(年月別・改名済み)
+├── review/         ← 要確認(レビューUIの対象)
+├── failed/         ← 3回失敗(画像不良など。人間が見る)
+├── ledger.db       ← SQLite本体
+└── reports/2026-08.html
+
+状態遷移:  inbox → processing → ┬→ confirmed(archive/ + DB確定)
+                                ├→ review  (自信度低・整合NG)
+                                └→ failed  (抽出3回失敗)</span></pre>
+  <p class="note">※ フォルダ＝状態にすると、DBを開かなくても<code>ls</code>で系の健全性がわかる。障害対応でログとキューを最初に見る癖のある人間には馴染む設計のはず。</p>
+</section>
+
+<!-- ================= 06 AI処理設計 ================= -->
+<section id="s6">
+  <div class="sec-head"><span class="no">06</span><h2>AI処理設計 — プロンプト・検証・分類</h2></div>
+  <h3><span class="hn">6-1</span>抽出プロンプト（実物）</h3>
+<pre><span class="cm"># Ollama /api/chat へのリクエスト(要点)</span>
+<span class="out">{
+  "model": "qwen3-vl:8b",
+  "options": {"temperature": 0},          </span><span class="cm">← 抽出は必ず0。ブレを殺す</span><span class="out">
+  "format": { ...5-1のJSONスキーマ... },  </span><span class="cm">← 構造化出力の強制</span><span class="out">
+  "messages": [{
+    "role": "user",
+    "images": ["(base64画像)"],
+    "content":
+      "これは日本の店舗のレシート画像です。記載内容を読み取ってください。\n\
+       ルール:\n\
+       1. 画像に書かれている情報だけを使う。推測で補完しない\n\
+       2. 読み取れない項目は空文字または0にする\n\
+       3. 金額は税込の整数(円)。カンマは除去\n\
+       4. 値引き行はpriceを負の値にする\n\
+       5. 全体の読み取りに対する自信をconfidenceに0.0-1.0で正直に申告する"
+  }]
+}</span></pre>
+  <h3><span class="hn">6-2</span>検証ロジック — 「三値管理」で品質を作る</h3>
+  <p>VLMの出力を信用せず、機械検証を通す。<em>品質はモデルではなく検証で作る</em>のが本仕様の思想。決済の三値管理と同じで、「成功/失敗」の間に「不明(要確認)」を明示的に置く。</p>
+  <div class="tbl-scroll"><table>
+    <tr><th>検証項目</th><th>ルール</th><th class="c">NG時の判定</th></tr>
+    <tr><td>合計整合</td><td>Σ(items.price) と total の差が ±2円以内（端数処理誤差を許容）</td><td class="c">review</td></tr>
+    <tr><td>日付妥当性</td><td>date が過去1年以内の実在日付</td><td class="c">review</td></tr>
+    <tr><td>自信度</td><td>confidence ≥ 0.8</td><td class="c">review</td></tr>
+    <tr><td>重複</td><td>pHash距離が近い既存画像なし、かつ (store,date,total) の完全一致なし</td><td class="c">review(重複疑い)</td></tr>
+    <tr><td>抽出成功</td><td>JSONパース成功かつ必須項目あり。失敗時は画像を回転/拡大して最大3回再試行</td><td class="c">3回失敗で failed</td></tr>
+  </table></div>
+  <h3><span class="hn">6-3</span>費目分類 — 2段構え</h3>
+  <ol class="steps">
+    <li><strong>店名マスタ優先：</strong><code>store_master</code>に一致があれば即決（LLM不要・0ms・ブレなし）。</li>
+    <li><strong>マスタに無い店だけLLM：</strong>店名＋品目リストを渡し、費目enumから1つ選ばせる（temperature=0）。ユーザーがレビューUIで直したらマスタに書き戻し、<em>同じ店で二度と間違えない</em>。</li>
+  </ol>
+  <div class="callout"><b>設計思想：</b>LLMは「初見の判断」だけに使い、確定した知識はマスタ（ただのテーブル）に降ろす。呼び出し回数が減る＝速く・安定し、挙動が説明可能になる。AIシステムを運用に耐えさせる基本パターンで、業務でもそのまま使える考え方。</div>
+
+  <h3><span class="hn">6-4</span>品目正規化とレポート用集計SQL（v1.1追加）</h3>
+  <p>「費目の中の品目ごとの集計」を成立させる鍵は<strong>品目名の正規化</strong>。レシートの生表記（<code>ｷｬﾍﾞﾂ1/2</code>、<code>ﾄﾘﾑﾈ</code>、<code>ｻﾝﾄﾘｰ金麦6P</code>）のままでは同じ物が別品目として散らばる。抽出時にLLMへ「一般名詞への正規化」も同時にやらせ、<code>items.name_norm</code>に格納する（生表記は<code>name</code>に原本保持）。</p>
+<pre><span class="cm"># 抽出プロンプトへの追記(6-1のルールに追加)</span>
+<span class="out">6. 各品目に name_norm を付ける: 記号・容量・規格を除いた一般名
+   (例:「ｷｬﾍﾞﾂ1/2」→「キャベツ」/「ﾄﾘﾑﾈ 2kg」→「鶏むね肉」)。
+   固有ブランドは種類名に寄せる(「金麦6P」→「ビール(6缶)」)</span></pre>
+<pre><span class="cm">-- (a) 日別出費推移(費目積み上げグラフの元データ)</span>
+<span class="k">SELECT</span> r.date, i.category, SUM(i.price) AS amount
+<span class="k">FROM</span> items i <span class="k">JOIN</span> receipts r ON r.id = i.receipt_id
+<span class="k">WHERE</span> r.status = 'confirmed' AND r.date LIKE '2026-08-%'
+<span class="k">GROUP BY</span> r.date, i.category <span class="k">ORDER BY</span> r.date;
+
+<span class="cm">-- (b) 費目内の品目別集計(回数・合計・平均単価)</span>
+<span class="k">SELECT</span> i.category, i.name_norm,
+       COUNT(*)      AS 回数,
+       SUM(i.price)  AS 合計,
+       SUM(i.price)/COUNT(*) AS 平均単価
+<span class="k">FROM</span> items i <span class="k">JOIN</span> receipts r ON r.id = i.receipt_id
+<span class="k">WHERE</span> r.status = 'confirmed' AND r.date LIKE '2026-08-%'
+<span class="k">GROUP BY</span> i.category, i.name_norm
+<span class="k">ORDER BY</span> i.category, 合計 DESC;</pre>
+  <p class="note">※ レポートHTMLはこの2本のSQL＋店舗集計だけで組み立てられる。グラフは外部ライブラリを使わず、Pythonで座標計算したSVGを埋め込む方式（オフライン完結・NFR-S1準拠）。実物の見た目はサンプルレポート「recebako-report-sample.html」を参照。</p>
+</section>
+
+<!-- ================= 07 非機能要件 ================= -->
+<section id="s7">
+  <div class="sec-head"><span class="no">07</span><h2>非機能要件（NFR）— 性能・品質・セキュリティ・保守</h2></div>
+  <h3><span class="hn">7-1</span>性能要件</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:80px" class="c">ID</th><th>項目</th><th>目標値</th><th>測定方法</th></tr>
+    <tr><td class="c mono">NFR-P1</td><td>1枚あたり処理時間</td><td>撮影→DB登録まで <strong>60秒以内</strong>（うちVLM抽出30秒以内）</td><td>処理ログのタイムスタンプ</td></tr>
+    <tr><td class="c mono">NFR-P2</td><td>バッチ処理能力</td><td>溜まった50枚を30分以内（Mac起動時の一括処理を想定）</td><td>実測</td></tr>
+    <tr><td class="c mono">NFR-P3</td><td>リソース占有</td><td>VLM常駐メモリ7GB以下。他作業と同居可能なこと。アイドル時はモデルをアンロード</td><td>ollama ps / Activity Monitor</td></tr>
+  </table></div>
+  <p class="note">※ VLM速度の実測は「性能測定手順書」の方法をそのまま使う。処理時間が目標を超える場合の緩和策はQwen3-VL 4Bへの切替（8-3参照）。</p>
+  <h3><span class="hn">7-2</span>品質要件 — 数値で定義する</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:80px" class="c">ID</th><th>項目</th><th>目標</th><th>備考</th></tr>
+    <tr><td class="c mono">NFR-Q1</td><td>合計金額の抽出精度</td><td><strong>98%以上</strong>（ゴールデンセット30枚）</td><td>家計簿の生命線。最優先</td></tr>
+    <tr><td class="c mono">NFR-Q2</td><td>店名・日付の抽出精度</td><td>95%以上</td><td>表記ゆれは正規化後に判定</td></tr>
+    <tr><td class="c mono">NFR-Q3</td><td>品目レベルの抽出精度</td><td>80%以上</td><td>v1では参考情報の位置づけ</td></tr>
+    <tr><td class="c mono">NFR-Q4</td><td>誤確定率</td><td>「confirmed判定なのに合計が誤り」が<strong>2%以下</strong></td><td>検証すり抜けの監視指標</td></tr>
+    <tr><td class="c mono">NFR-Q5</td><td>要確認率</td><td>30%以下（運用が回る上限）</td><td>高すぎたらプロンプト/モデル見直し</td></tr>
+  </table></div>
+  <h3><span class="hn">7-3</span>セキュリティ要件</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:80px" class="c">ID</th><th>項目</th><th>要件</th></tr>
+    <tr><td class="c mono">NFR-S1</td><td>データ境界</td><td>レシート画像・抽出データ・DBは<strong>インターネットに送信しない</strong>。通信はSyncthingのP2P（TLS・デバイスID相互承認済み端末のみ）に限定</td></tr>
+    <tr><td class="c mono">NFR-S2</td><td>クラウド排除</td><td>Receipts/フォルダをGoogleフォトのバックアップ対象から除外し、レシートがGoogle側に複製されない構成を維持する</td></tr>
+    <tr><td class="c mono">NFR-S3</td><td>ログ衛生</td><td>ログに品目・金額等の内容を出力しない（ファイル名・状態・所要時間のみ）。デバッグ出力は開発時フラグでのみ有効</td></tr>
+    <tr><td class="c mono">NFR-S4</td><td>保存時保護</td><td>Mac側はFileVault(ディスク暗号化)有効を前提。バックアップはTime Machine等ローカルのみ</td></tr>
+    <tr><td class="c mono">NFR-S5</td><td>レビューUI</td><td>127.0.0.1バインドのみ（LAN公開しない）。認証不要の代わりに外部到達性ゼロで担保</td></tr>
+    <tr><td class="c mono">NFR-S6</td><td>依存の健全性</td><td>依存パッケージは最小限とし、四半期ごとに脆弱性確認（pip-audit）。モデルはHugging Face公式リポジトリからのみ取得</td></tr>
+  </table></div>
+  <h3><span class="hn">7-4</span>可用性・保守性</h3>
+  <ul class="plain">
+    <li><strong>再開性：</strong>どの段階でクラッシュしてもファイルの場所（フォルダ＝状態）から安全に再開できる。二重処理はpHashで防ぐ。</li>
+    <li><strong>モデル差し替え：</strong>モデル名・エンドポイントは設定ファイル1箇所。将来LiteLLM経由に切り替える場合もbase_url変更のみで対応可能なこと。</li>
+    <li><strong>撤退容易性：</strong>全データはSQLite1ファイル＋画像フォルダ。CSVエクスポート機能を持ち、いつでも他の家計簿アプリへ移行できる（ロックイン無し）。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 技術選定とライセンス ================= -->
+<section id="s8">
+  <div class="sec-head"><span class="no">08</span><h2>技術選定とライセンス — 全部「使っていいもの」で組む</h2></div>
+  <div class="tbl-scroll"><table>
+    <tr><th>層</th><th>採用技術</th><th class="c">ライセンス</th><th class="c">商用可</th><th>選定理由</th></tr>
+    <tr><td>抽出モデル</td><td><strong>Qwen3-VL 8B</strong>（第一候補）/ 4B（速度優先時）</td><td class="c mono">Apache 2.0</td><td class="c"><span class="ok">◎</span></td><td>日本語レシートの読解実績・OllamaでQ4_K_M配布・制約のないOSSライセンス</td></tr>
+    <tr><td>（比較検討）</td><td>Gemma 3 12B</td><td class="c mono">Gemma利用規約<br>(独自)</td><td class="c">△条件付</td><td>性能は候補だが利用制限付き独自ライセンスのため<strong>不採用</strong>。判断根拠として記録</td></tr>
+    <tr><td>推論ランタイム</td><td>Ollama（llama.cpp内包）</td><td class="c mono">MIT</td><td class="c"><span class="ok">◎</span></td><td>API・モデル管理・スキーマ強制formatが揃う。※LM StudioはGUIは優秀だがプロプライエタリのため本番系から除外</td></tr>
+    <tr><td>同期</td><td>Syncthing</td><td class="c mono">MPL-2.0</td><td class="c"><span class="ok">◎</span></td><td>P2P・E2E暗号化・Android/macOS両対応・サーバ不要</td></tr>
+    <tr><td>DB</td><td>SQLite</td><td class="c mono">Public Domain</td><td class="c"><span class="ok">◎</span></td><td>単一ファイル・バックアップ容易・SQLで集計自在</td></tr>
+    <tr><td>アプリ層</td><td>Python 3.12 + watchdog + Pillow + imagehash + FastAPI(レビューUI)</td><td class="c mono">PSF/BSD/MIT系</td><td class="c"><span class="ok">◎</span></td><td>全て寛容ライセンス。依存は5パッケージ以内に抑制</td></tr>
+  </table></div>
+  <div class="callout"><b>ライセンス方針：</b>採用基準は「①OSI準拠の寛容ライセンス（Apache/MIT/BSD/MPL）を優先 ②モデルは利用制限付き独自ライセンス（Gemma系・Llama系）より<strong>Apache 2.0のQwen系を優先</strong> ③プロプライエタリは開発補助までとし本番経路に置かない」。個人利用では過剰に見えるが、この判断記録がそのまま業務でのOSS選定レビューの雛形になる。</div>
+</section>
+
+<!-- ================= 09 テスト計画 ================= -->
+<section id="s9">
+  <div class="sec-head"><span class="no">09</span><h2>テスト計画と受入基準</h2></div>
+  <h3><span class="hn">9-1</span>ゴールデンセットの構築（最初の週末にやる）</h3>
+  <ul class="plain">
+    <li>実レシート<strong>30枚</strong>を撮影し、正解データ（店名・日付・合計・品目）を手入力したCSVを作る。</li>
+    <li>内訳を意図的に散らす：スーパー10・コンビニ5・飲食店5（手書き風含む）・ドラッグストア5・その他5。<em>長いレシート・感熱紙の薄いやつ・くしゃくしゃのやつ</em>を必ず混ぜる。</li>
+    <li>撮影条件も散らす：明るい/暗い、正面/斜め、影あり。</li>
+  </ul>
+  <h3><span class="hn">9-2</span>テスト項目</h3>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:120px">試験</th><th>内容</th><th>合格基準</th></tr>
+    <tr><td>抽出精度試験</td><td>ゴールデンセット30枚を流し、正解CSVと突合</td><td>NFR-Q1〜Q3の達成</td></tr>
+    <tr><td>検証機能試験</td><td>故意に壊した画像（白紙・ボケ・レシート以外の写真）を投入</td><td>全件がreview/failedに落ち、confirmedに混入しない</td></tr>
+    <tr><td>重複試験</td><td>同一レシートを2回投入・再撮影版を投入</td><td>2回目がreview(重複疑い)になる</td></tr>
+    <tr><td>E2E試験</td><td>Pixelで撮影→レポート反映まで通し</td><td>無操作で60秒以内にDB登録</td></tr>
+    <tr><td>境界試験</td><td>処理中のMac強制終了→再起動</td><td>欠損・二重登録なく自動再開</td></tr>
+    <tr><td>通信試験</td><td>処理中の外向き通信を監視（Little Snitch等）</td><td>Syncthing以外の外部通信ゼロ</td></tr>
+  </table></div>
+  <p class="note">※ モデルやプロンプトを変えたら同じ30枚を流し直す。これが「回帰テスト」になり、性能測定手順書で作った評価の型がそのまま生きる。</p>
+</section>
+
+<!-- ================= 10 ロードマップ ================= -->
+<section id="s10">
+  <div class="sec-head"><span class="no">10</span><h2>開発ロードマップ — 週末3回で本稼働</h2></div>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:110px">フェーズ</th><th>やること</th><th>完了条件（Doneの定義）</th></tr>
+    <tr><td><strong>Phase 0</strong><br>PoC（半日）</td><td>レシート1枚をcurlでOllamaに投げ、スキーマ通りのJSONが返ることを確認。5枚で精度の肌感を掴む</td><td>「いけそう」の確信。ダメなら4B/プロンプト調整を試す</td></tr>
+    <tr><td><strong>Phase 1</strong><br>MVP（週末1）</td><td>Syncthing設定＋watcher＋抽出＋検証＋SQLite保存。レビューはSQLite直接編集で代用</td><td>撮る→勝手にDBに入る、が動く</td></tr>
+    <tr><td><strong>Phase 2</strong><br>品質（週末2）</td><td>ゴールデンセット30枚で精度測定→プロンプト・検証閾値の調整。費目分類＋店名マスタ実装</td><td>NFR-Q1〜Q3達成</td></tr>
+    <tr><td><strong>Phase 3</strong><br>運用（週末3）</td><td>月次レポート生成＋レビューUI＋失敗時通知（macOS通知）</td><td>1週間ノーメンテで回る</td></tr>
+    <tr><td><strong>Phase 4</strong><br>発展（任意）</td><td>スクショ脳(No.002)・書類執事(No.006)へ同じ骨格を横展開 / Pixelオンデバイス化（小型VLMをスマホ側で動かしMacレス化）の検討</td><td>—</td></tr>
+  </table></div>
+</section>
+
+<!-- ================= 11 リスク ================= -->
+<section id="s11">
+  <div class="sec-head"><span class="no">11</span><h2>リスクと対策</h2></div>
+  <div class="tbl-scroll"><table>
+    <tr><th>リスク</th><th class="c" style="width:70px">影響</th><th>対策</th></tr>
+    <tr><td>手書き・かすれレシートの精度不足</td><td class="c">中</td><td>三値管理でreviewに落とす設計が既に対策。無理に自動化率100%を狙わない（要確認率30%以内なら成功と定義）</td></tr>
+    <tr><td>品目の日本語略称が解釈不能（「ｷｬﾍﾞﾂ1/2」等）</td><td class="c">小</td><td>品目はv1では参考情報の位置づけ（NFR-Q3=80%）。費目はレシート単位の主費目で運用</td></tr>
+    <tr><td>Syncthingの同期遅延・電池消費</td><td class="c">小</td><td>Wi-Fi接続時のみ同期の設定。リアルタイム性は要件でない（60秒目標はMac側処理）</td></tr>
+    <tr><td>モデルの世代交代（より良いVLMの登場）</td><td class="c">好機</td><td>設定1箇所差し替え＋ゴールデンセット再実行で乗り換え判断が30分で可能な設計にしてある</td></tr>
+    <tr><td>家族の写真等、レシート以外がinboxに混入</td><td class="c">中</td><td>VLMに「レシートでない場合はis_receipt=falseを返す」判定を追加し、即failedへ隔離（v1.1で対応）</td></tr>
+  </table></div>
+</section>
+
+<!-- ================= 12 用語集 ================= -->
+<section id="s12">
+  <div class="sec-head"><span class="no">12</span><h2>用語集（初心者向け）</h2></div>
+  <div class="tbl-scroll"><table>
+    <tr><th style="width:160px">用語</th><th>意味</th></tr>
+    <tr><td>VLM</td><td>Vision Language Model。画像を「見て」言葉で答えられるLLM。本システムの目</td></tr>
+    <tr><td>構造化出力</td><td>LLMの返答を自由文でなくJSONスキーマ通りに強制する仕組み。Ollamaではformatパラメータ</td></tr>
+    <tr><td>温度(temperature)</td><td>出力のランダム性。0にすると毎回同じ答えになり、抽出処理が安定する</td></tr>
+    <tr><td>pHash(知覚ハッシュ)</td><td>画像の「見た目の指紋」。少し違う撮り直し画像も同一と判定でき、重複検出に使う</td></tr>
+    <tr><td>三値管理</td><td>成功/失敗の二択でなく「不明(要確認)」を明示的に設ける設計。AIの不確実さを運用で受け止める要</td></tr>
+    <tr><td>ゴールデンセット</td><td>正解付きのテストデータ集。精度を数値で語り、変更の良し悪しを判定する物差し</td></tr>
+    <tr><td>launchd</td><td>macOS標準のジョブ管理。フォルダ監視や定期実行をOSに任せられる(Linuxのsystemd相当)</td></tr>
+    <tr><td>Picker API</td><td>Googleフォトから「ユーザーが手で選んだ写真だけ」をアプリに渡す公式API。全自動取得はできない</td></tr>
+  </table></div>
+</section>
+
+<footer>RECEBAKO SYSTEM SPECIFICATION v1.0 — SHOOT IT, FORGET IT / ALL DATA STAYS HOME — 2026-07-25</footer>
+</div>
+</body>
+</html>
