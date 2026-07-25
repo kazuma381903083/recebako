@@ -40,7 +40,11 @@ def normalize_receipt(
     data = receipt.model_dump(mode="python")
     data["items"] = [
         item.model_dump(mode="python")
-        for item in normalize_item_taxes(list(receipt.items), receipt.tax_breakdowns)
+        for item in normalize_item_taxes(
+            list(receipt.items),
+            receipt.tax_breakdowns,
+            total=receipt.total,
+        )
     ]
     data["date_raw"] = normalization.raw
     data["date"] = normalization.normalized or ""

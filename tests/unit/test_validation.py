@@ -243,6 +243,113 @@ def test_missing_external_tax_breakdown_remains_review() -> None:
     assert {issue.code for issue in result.issues} == {"total.mismatch"}
 
 
+def test_unique_subtotals_resolve_multiple_external_tax_rates() -> None:
+    raw_receipt = _receipt(
+        date="2022年05月14日",
+        items=[
+            {
+                "name": "8%商品A",
+                "price": 600,
+                "price_raw": 600,
+                "tax_rate": None,
+                "tax_treatment": "excluded",
+            },
+            {
+                "name": "8%商品B",
+                "price": 148,
+                "price_raw": 148,
+                "tax_rate": None,
+                "tax_treatment": "excluded",
+            },
+            {
+                "name": "10%内税商品A",
+                "price": 5800,
+                "price_raw": 5800,
+                "tax_rate": None,
+                "tax_treatment": "included",
+            },
+            {
+                "name": "10%内税商品B",
+                "price": 5800,
+                "price_raw": 5800,
+                "tax_rate": None,
+                "tax_treatment": "included",
+            },
+            {
+                "name": "10%外税商品",
+                "price": 3,
+                "price_raw": 3,
+                "tax_rate": None,
+                "tax_treatment": "excluded",
+            },
+        ],
+        tax_breakdowns=[
+            {
+                "tax_rate": 8,
+                "taxable_amount": 748,
+                "tax_amount": 59,
+                "tax_treatment": "excluded",
+            },
+            {
+                "tax_rate": 10,
+                "taxable_amount": 3,
+                "tax_amount": 3,
+                "tax_treatment": "excluded",
+            },
+        ],
+        total=12410,
+    )
+
+    receipt, result = validate_receipt_payload(
+        raw_receipt.model_dump_json(),
+        reference_date=REFERENCE_DATE,
+        mode=IngestMode.HISTORICAL,
+    )
+
+    assert receipt is not None
+    assert [item.price for item in receipt.items] == [647, 160, 5800, 5800, 3]
+    assert [item.tax_rate for item in receipt.items] == [8, 8, None, None, None]
+    assert [item.tax_adjustment for item in receipt.items] == [47, 12, 0, 0, 0]
+    assert result.status is ReceiptStatus.CONFIRMED
+    assert result.issues == []
+
+
+def test_ambiguous_subtotal_match_remains_review() -> None:
+    result = validate_receipt(
+        _receipt(
+            items=[
+                {
+                    "name": "同額商品A",
+                    "price": 100,
+                    "price_raw": 100,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                },
+                {
+                    "name": "同額商品B",
+                    "price": 100,
+                    "price_raw": 100,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                },
+            ],
+            tax_breakdowns=[
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": 100,
+                    "tax_amount": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            total=208,
+        ),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.status is ReceiptStatus.REVIEW
+    assert {issue.code for issue in result.issues} == {"total.mismatch"}
+
+
 @pytest.mark.parametrize(
     ("receipt", "expected_code"),
     [

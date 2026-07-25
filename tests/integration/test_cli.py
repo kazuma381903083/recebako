@@ -103,6 +103,78 @@ def _mixed_tax_payload(*, receipt_date: str) -> str:
     )
 
 
+def _multiple_external_tax_payload(*, receipt_date: str) -> str:
+    return json.dumps(
+        {
+            "store": "テスト商店",
+            "date": receipt_date,
+            "time": "19:58",
+            "items": [
+                {
+                    "name": "8%商品A",
+                    "qty": 1,
+                    "price": 600,
+                    "price_raw": 600,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                },
+                {
+                    "name": "8%商品B",
+                    "qty": 1,
+                    "price": 148,
+                    "price_raw": 148,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                },
+                {
+                    "name": "内税商品A",
+                    "qty": 1,
+                    "price": 5800,
+                    "price_raw": 5800,
+                    "tax_rate": None,
+                    "tax_treatment": "included",
+                },
+                {
+                    "name": "内税商品B",
+                    "qty": 1,
+                    "price": 5800,
+                    "price_raw": 5800,
+                    "tax_rate": None,
+                    "tax_treatment": "included",
+                },
+                {
+                    "name": "10%外税商品",
+                    "qty": 1,
+                    "price": 3,
+                    "price_raw": 3,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                },
+            ],
+            "subtotal": 0,
+            "tax": 0,
+            "tax_breakdowns": [
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": 748,
+                    "tax_amount": 59,
+                    "tax_treatment": "excluded",
+                },
+                {
+                    "tax_rate": 10,
+                    "taxable_amount": 3,
+                    "tax_amount": 3,
+                    "tax_treatment": "excluded",
+                },
+            ],
+            "total": 12410,
+            "payment": "unknown",
+            "confidence": 0.8,
+        },
+        ensure_ascii=False,
+    )
+
+
 def test_extract_command_prints_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -143,6 +215,44 @@ def test_extract_command_prints_json(
     assert captured.err == ""
     assert len(temporary_paths) == 1
     assert not temporary_paths[0].exists()
+
+
+def test_extract_resolves_multiple_external_tax_rates_from_unique_subtotals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image_path = tmp_path / "multiple-tax-rates.jpg"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    monkeypatch.setattr(
+        cli,
+        "request_receipt_extraction",
+        lambda path: _multiple_external_tax_payload(receipt_date="2022年05月14日"),
+    )
+
+    exit_code = cli.run(["extract", str(image_path), "--mode", "historical"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["status"] == "confirmed"
+    assert output["validation_issues"] == []
+    assert [item["price"] for item in output["items"]] == [
+        647,
+        160,
+        5800,
+        5800,
+        3,
+    ]
+    assert [item["tax_adjustment"] for item in output["items"]] == [
+        47,
+        12,
+        0,
+        0,
+        0,
+    ]
+    assert captured.err == ""
 
 
 def test_extract_command_prints_failed_as_valid_json(
