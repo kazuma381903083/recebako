@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from recebako.ai import OllamaError, extract_receipt
+from recebako.ai import OllamaError, request_receipt_extraction
+from recebako.domain import ReceiptExtraction, ValidationResult
+from recebako.imaging import ImagePreprocessError, preprocess_image
+from recebako.validation import validate_receipt_payload
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,13 +41,46 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        extraction = extract_receipt(image_path)
-    except (OSError, OllamaError) as exc:
+        with preprocess_image(image_path) as preprocessed:
+            raw_extraction = request_receipt_extraction(preprocessed.path)
+            extraction, validation = validate_receipt_payload(
+                raw_extraction,
+                reference_date=datetime.now(timezone.utc).astimezone().date(),
+            )
+            output = _output_payload(
+                extraction,
+                validation,
+                phash=preprocessed.phash,
+            )
+    except (ImagePreprocessError, OSError, OllamaError) as exc:
         print(f"recebako: error: {exc}", file=sys.stderr)
         return 1
 
-    print(extraction.model_dump_json(indent=2))
+    print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
+
+
+def _output_payload(
+    extraction: ReceiptExtraction | None,
+    validation: ValidationResult,
+    *,
+    phash: str,
+) -> dict[str, Any]:
+    if extraction is None:
+        output: dict[str, Any] = {"receipt": None}
+    else:
+        output = extraction.model_dump(mode="json")
+
+    output.update(
+        {
+            "status": validation.status.value,
+            "validation_issues": [
+                issue.model_dump(mode="json") for issue in validation.issues
+            ],
+            "phash": phash,
+        }
+    )
+    return output
 
 
 def main() -> None:

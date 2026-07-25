@@ -1,3 +1,7 @@
-from recebako.ai.ollama import OllamaError, extract_receipt
+from recebako.ai.ollama import (
+    OllamaError,
+    extract_receipt,
+    request_receipt_extraction,
+)
 
-__all__ = ["OllamaError", "extract_receipt"]
+__all__ = ["OllamaError", "extract_receipt", "request_receipt_extraction"]

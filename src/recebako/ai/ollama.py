@@ -52,7 +52,7 @@ def _request_payload(image_bytes: bytes) -> dict[str, Any]:
     }
 
 
-def extract_receipt(image_path: Path) -> ReceiptExtraction:
+def request_receipt_extraction(image_path: Path) -> str:
     image_bytes = image_path.read_bytes()
 
     try:
@@ -76,6 +76,16 @@ def extract_receipt(image_path: Path) -> ReceiptExtraction:
 
     try:
         chat_response = _OllamaChatResponse.model_validate(response.json())
-        return ReceiptExtraction.model_validate_json(chat_response.message.content)
     except (ValueError, ValidationError) as exc:
+        raise OllamaError("Ollamaから無効な応答を受信しました") from exc
+
+    return chat_response.message.content
+
+
+def extract_receipt(image_path: Path) -> ReceiptExtraction:
+    try:
+        return ReceiptExtraction.model_validate_json(
+            request_receipt_extraction(image_path)
+        )
+    except ValidationError as exc:
         raise OllamaError("Ollamaから無効な構造化応答を受信しました") from exc
