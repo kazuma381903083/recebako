@@ -13,6 +13,7 @@ from recebako import cli
 from recebako.config import CONFIG_ENV_VAR
 from recebako.runtime import (
     InboxLock,
+    RuntimeFileError,
     claim_inbox_file,
     initialize_runtime,
     scan_inbox,
@@ -368,6 +369,7 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
     image_path = tmp_path / "receipt.png"
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
+    original_bytes = image_path.read_bytes()
     data_root = tmp_path / "data"
     config_path = _write_config(tmp_path, data_root)
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
@@ -418,7 +420,7 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
             (second_output["receipt_id"],),
         ).fetchone()
         image_paths = connection.execute(
-            "SELECT image_path FROM receipts ORDER BY id"
+            "SELECT image_path, file_state FROM receipts ORDER BY id"
         ).fetchall()
 
     assert receipt_count is not None and receipt_count[0] == 2
@@ -426,13 +428,71 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
     assert confirmed_count is not None and confirmed_count[0] == 1
     assert duplicate_row is not None
     assert duplicate_row[0] == first_output["receipt_id"]
-    assert image_path.is_file()
+    assert image_path.read_bytes() == original_bytes
     assert all(
         not Path(stored_path[0]).is_absolute()
         and ".." not in Path(stored_path[0]).parts
-        and stored_path[0].startswith("unmanaged/")
+        and (data_root / stored_path[0]).is_file()
+        and stored_path[1] == "finalized"
         for stored_path in image_paths
     )
+    assert image_paths[0][0].startswith("archive/")
+    assert image_paths[1][0].startswith("review/")
+
+
+def test_process_final_move_failure_stays_pending_and_is_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image_path = tmp_path / "receipt.png"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    original_bytes = image_path.read_bytes()
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _ollama_payload(receipt_date=_today().isoformat()),
+    )
+    original_move_to_final = cli.move_to_final
+
+    def fail_final_move(*args: Any, **kwargs: Any) -> Path:
+        raise RuntimeFileError("forced final move failure")
+
+    monkeypatch.setattr(cli, "move_to_final", fail_final_move)
+
+    exit_code = cli.run(["process", str(image_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert image_path.read_bytes() == original_bytes
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        pending = connection.execute(
+            "SELECT status, image_path, file_state FROM receipts WHERE id = 1"
+        ).fetchone()
+    assert pending is not None
+    assert pending[0] == "confirmed"
+    assert pending[1].startswith("processing/")
+    assert pending[2] == "pending"
+    assert (data_root / pending[1]).is_file()
+
+    monkeypatch.setattr(cli, "move_to_final", original_move_to_final)
+    recover_exit_code = cli.run(["runtime", "recover"])
+
+    recover_output = json.loads(capsys.readouterr().out)
+    assert recover_exit_code == 0
+    assert recover_output["recovered"] == 1
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        finalized = connection.execute(
+            "SELECT image_path, file_state FROM receipts WHERE id = 1"
+        ).fetchone()
+    assert finalized is not None
+    assert finalized[0].startswith("archive/")
+    assert finalized[1] == "finalized"
+    assert (data_root / finalized[0]).is_file()
 
 
 def test_process_historical_mode_saves_old_receipt_as_confirmed(

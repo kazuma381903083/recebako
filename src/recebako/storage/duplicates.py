@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from recebako.domain import NormalizedReceiptExtraction
+from recebako.domain import NormalizedReceiptExtraction, ReceiptFileState
 
 # This threshold is intentionally configurable: pHash distance quality depends on
 # receipt capture conditions and must be tuned with production observations.
@@ -37,8 +37,10 @@ def find_duplicate_candidate(
         """
         SELECT id, store, date, total, phash
         FROM receipts
+        WHERE file_state = ?
         ORDER BY id
-        """
+        """,
+        (ReceiptFileState.FINALIZED.value,),
     ).fetchall()
 
     exact_candidates: list[DuplicateCandidate] = []

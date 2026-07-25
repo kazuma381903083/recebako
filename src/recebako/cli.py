@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import sqlite3
+import stat
 import sys
+import tempfile
+import uuid
 from collections.abc import Sequence
+from contextlib import closing
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -13,20 +20,29 @@ from recebako.config import AppConfig, ConfigError, load_config
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
+    ReceiptFileState,
     ValidationResult,
 )
 from recebako.imaging import ImagePreprocessError, preprocess_image
 from recebako.pipeline import process_receipt
 from recebako.runtime import (
     InboxLockError,
+    RuntimeFileError,
     RuntimeLayoutError,
+    RuntimePaths,
     initialize_runtime,
+    move_regular_file_no_overwrite,
+    move_to_final,
     recover_runtime,
     run_inbox,
 )
 from recebako.storage import (
+    ImagePathError,
     MigrationError,
+    ReceiptRepository,
     StorageError,
+    connect_database,
+    image_path_relative_to_root,
     initialize_database,
 )
 from recebako.validation import validate_receipt_payload
@@ -124,13 +140,45 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_image_path(image_path: Path) -> bool:
-    if image_path.is_file():
+    if not image_path.is_symlink() and image_path.is_file():
         return True
     print(
         f"recebako: error: 画像ファイルが見つかりません: {image_path}",
         file=sys.stderr,
     )
     return False
+
+
+def _copy_to_processing(image_path: Path, paths: RuntimePaths) -> Path:
+    open_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        open_flags |= os.O_NOFOLLOW
+
+    try:
+        source_descriptor = os.open(image_path, open_flags)
+    except OSError as exc:
+        raise RuntimeFileError("画像を安全に読み込めません") from exc
+
+    work_path = paths.processing / f"work-{uuid.uuid4().hex}--{image_path.name}"
+    try:
+        with (
+            os.fdopen(source_descriptor, "rb") as source_file,
+            tempfile.TemporaryDirectory(
+                prefix="recebako-import-", dir=paths.tmp
+            ) as temporary_directory,
+        ):
+            if not stat.S_ISREG(os.fstat(source_file.fileno()).st_mode):
+                raise RuntimeFileError("処理対象が通常ファイルではありません")
+            temporary_path = Path(temporary_directory) / "source-copy"
+            with temporary_path.open("xb") as temporary_file:
+                shutil.copyfileobj(source_file, temporary_file)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            return move_regular_file_no_overwrite(temporary_path, work_path)
+    except RuntimeFileError:
+        raise
+    except OSError as exc:
+        raise RuntimeFileError("画像をprocessingへ安全にコピーできません") from exc
 
 
 def _local_date() -> date:
@@ -187,18 +235,54 @@ def _run_process(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        paths, _ = initialize_runtime(config.data.root)
+        reference_date = _local_date()
+        recovery = recover_runtime(
+            config=config,
+            fallback_date=reference_date,
+            dry_run=False,
+        )
+        if recovery.errors:
+            raise RuntimeFileError("processingの自動回復に失敗しました")
+        work_path = _copy_to_processing(image_path, paths)
         result = process_receipt(
-            image_path,
+            work_path,
             config=config,
             mode=IngestMode(args.mode),
-            reference_date=_local_date(),
+            reference_date=reference_date,
+            storage_image_path=Path("processing") / work_path.name,
+            file_state=ReceiptFileState.PENDING,
+            temporary_root=paths.tmp,
         )
+        destination = move_to_final(
+            work_path,
+            paths,
+            receipt_id=result.receipt_id,
+            status=result.status,
+            date_value=result.date,
+            fallback_date=reference_date,
+            original_name=image_path.name,
+        )
+        relative_destination = image_path_relative_to_root(
+            config.data.root,
+            destination,
+        )
+        with closing(connect_database(config.data.root)) as connection:
+            ReceiptRepository(connection).finalize_image_path(
+                result.receipt_id,
+                Path(relative_destination),
+            )
     except (
+        ImagePathError,
         ImagePreprocessError,
+        InboxLockError,
         MigrationError,
         OSError,
         OllamaError,
+        RuntimeFileError,
+        RuntimeLayoutError,
         StorageError,
+        sqlite3.Error,
     ) as exc:
         print(f"recebako: error: {exc}", file=sys.stderr)
         return 1
@@ -219,6 +303,7 @@ def _run_runtime_init() -> int:
         ConfigError,
         MigrationError,
         OSError,
+        RuntimeFileError,
         RuntimeLayoutError,
         StorageError,
     ) as exc:
@@ -242,6 +327,7 @@ def _run_inbox(args: argparse.Namespace) -> int:
         InboxLockError,
         MigrationError,
         OSError,
+        RuntimeFileError,
         RuntimeLayoutError,
         StorageError,
         ValueError,

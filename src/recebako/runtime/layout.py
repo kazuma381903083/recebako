@@ -63,6 +63,17 @@ def _assert_no_symlink_components(path: Path) -> None:
             )
 
 
+def _assert_outside_git_worktree(data_root: Path) -> None:
+    current = data_root.resolve(strict=False)
+    while True:
+        git_marker = current / ".git"
+        if git_marker.exists() or git_marker.is_symlink():
+            raise RuntimeLayoutError("data.rootはGitワークツリー外に配置してください")
+        if current == current.parent:
+            break
+        current = current.parent
+
+
 def managed_path(data_root: Path, relative_name: str) -> Path:
     relative = PurePosixPath(relative_name)
     if (
@@ -101,6 +112,7 @@ def _reject_unsafe_existing_path(path: Path, *, directory: bool) -> None:
 def initialize_runtime(data_root: Path) -> tuple[RuntimePaths, RuntimeInitResult]:
     if not data_root.is_absolute():
         raise RuntimeLayoutError("data.rootは絶対パスである必要があります")
+    _assert_outside_git_worktree(data_root)
     _assert_no_symlink_components(data_root)
     _reject_unsafe_existing_path(data_root, directory=True)
     data_root.mkdir(parents=True, exist_ok=True)
@@ -132,6 +144,7 @@ def initialize_runtime(data_root: Path) -> tuple[RuntimePaths, RuntimeInitResult
 def validate_runtime_paths(data_root: Path) -> RuntimePaths:
     if not data_root.is_absolute():
         raise RuntimeLayoutError("data.rootは絶対パスである必要があります")
+    _assert_outside_git_worktree(data_root)
     _assert_no_symlink_components(data_root)
     paths = _paths(data_root)
     if not data_root.is_dir():

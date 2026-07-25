@@ -21,7 +21,11 @@ from recebako.imaging import (
     InvalidImageError,
     UnsupportedImageFormatError,
 )
-from recebako.runtime.files import RuntimeFileError
+from recebako.runtime.files import (
+    RuntimeFileError,
+    move_regular_file_no_overwrite,
+    move_regular_file_with_collision_retry,
+)
 from recebako.runtime.layout import RuntimePaths
 from recebako.storage import ImagePathError, MigrationError, StorageError
 
@@ -183,26 +187,24 @@ def move_to_failed(
         raise FailedMetadataError("failed移動元のファイル名が不正です")
     if paths.failed.is_symlink() or not paths.failed.is_dir():
         raise FailedMetadataError("failedディレクトリを安全に利用できません")
-    suffix = Path(source_filename).suffix
-    stem = source_filename[: -len(suffix)] if suffix else source_filename
-    counter = 0
-    while True:
-        candidate_name = (
-            source_filename if counter == 0 else f"{stem}.{counter}{suffix}"
-        )
-        destination = paths.failed / candidate_name
+
+    def metadata_destination_is_available(destination: Path) -> bool:
         metadata_path = destination.with_name(f"{destination.name}.error.json")
-        if (
+        return (
             not destination.exists()
             and not destination.is_symlink()
             and not metadata_path.exists()
             and not metadata_path.is_symlink()
-        ):
-            break
-        counter += 1
+        )
+
     try:
-        return work_path.rename(destination)
-    except OSError as exc:
+        return move_regular_file_with_collision_retry(
+            work_path,
+            paths.failed,
+            source_filename,
+            destination_available=metadata_destination_is_available,
+        )
+    except (OSError, RuntimeFileError) as exc:
         raise FailedMetadataError("画像をfailedへ移動できません") from exc
 
 
@@ -233,8 +235,8 @@ def write_failed_metadata(
             )
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        temporary_path.rename(metadata_path)
-    except OSError as exc:
+        move_regular_file_no_overwrite(temporary_path, metadata_path)
+    except (OSError, RuntimeFileError) as exc:
         raise FailedMetadataError("failedメタデータを保存できません") from exc
     finally:
         if temporary_path is not None:

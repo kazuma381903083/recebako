@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -12,17 +13,21 @@ from recebako.ai import OllamaTimeoutError
 from recebako.domain import ReceiptStatus
 from recebako.runtime import (
     RUNTIME_DIRECTORY_NAMES,
+    FailedMetadataError,
     InboxLock,
     InboxLockError,
+    RuntimeFileError,
     RuntimeLayoutError,
     claim_inbox_file,
     failed_metadata,
     initialize_runtime,
     managed_path,
+    move_regular_file_no_overwrite,
     move_to_failed,
     move_to_final,
     original_name_from_work_name,
     scan_inbox,
+    validate_runtime_paths,
     write_failed_metadata,
 )
 
@@ -45,7 +50,11 @@ def test_runtime_init_creates_directories_and_migrated_database(
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert versions == [("001_initial",), ("002_tax_normalization",)]
+    assert versions == [
+        ("001_initial",),
+        ("002_tax_normalization",),
+        ("003_receipt_file_state",),
+    ]
 
 
 def test_runtime_init_is_repeatable_and_preserves_existing_files(
@@ -96,6 +105,29 @@ def test_runtime_init_rejects_managed_directory_symlink(
 
     with pytest.raises(RuntimeLayoutError, match="シンボリックリンク"):
         initialize_runtime(data_root)
+
+
+def test_runtime_init_rejects_git_worktree_before_writing(tmp_path: Path) -> None:
+    worktree = tmp_path / "project"
+    worktree.mkdir()
+    (worktree / ".git").mkdir()
+    data_root = worktree / "private-data"
+
+    with pytest.raises(RuntimeLayoutError, match="Gitワークツリー外"):
+        initialize_runtime(data_root)
+
+    assert not data_root.exists()
+
+
+def test_runtime_validation_rejects_existing_root_inside_git_worktree(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "private-data"
+    initialize_runtime(data_root)
+    (tmp_path / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+
+    with pytest.raises(RuntimeLayoutError, match="Gitワークツリー外"):
+        validate_runtime_paths(data_root)
 
 
 def test_managed_path_rejects_root_escape(tmp_path: Path) -> None:
@@ -175,6 +207,64 @@ def test_claim_work_name_restores_original_and_preserves_bytes(
     assert work_path.read_bytes() == original_bytes
 
 
+def test_claim_rejects_regular_file_replaced_after_scan(tmp_path: Path) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    source = paths.inbox / "receipt.jpg"
+    source.write_bytes(b"original")
+    candidate = scan_inbox(paths).selected[0]
+    source.unlink()
+    source.write_bytes(b"replacement-with-different-size")
+
+    with pytest.raises(RuntimeFileError, match="置き換え"):
+        claim_inbox_file(candidate, paths, token=WORK_TOKEN)
+
+    assert source.read_bytes() == b"replacement-with-different-size"
+    assert list(paths.processing.iterdir()) == []
+
+
+def test_claim_rejects_symlink_replaced_after_scan(tmp_path: Path) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    source = paths.inbox / "receipt.jpg"
+    source.write_bytes(b"original")
+    candidate = scan_inbox(paths).selected[0]
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+    source.unlink()
+    source.symlink_to(outside)
+
+    with pytest.raises(RuntimeFileError, match="通常ファイル"):
+        claim_inbox_file(candidate, paths, token=WORK_TOKEN)
+
+    assert source.is_symlink()
+    assert outside.read_bytes() == b"outside"
+    assert list(paths.processing.iterdir()) == []
+
+
+def test_claim_retries_generated_work_name_collision_without_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    source = paths.inbox / "receipt.jpg"
+    source.write_bytes(b"new")
+    candidate = scan_inbox(paths).selected[0]
+    first_token = "a" * 32
+    second_token = "b" * 32
+    existing = paths.processing / f"work-{first_token}--receipt.jpg"
+    existing.write_bytes(b"existing")
+    tokens = iter((uuid.UUID(hex=first_token), uuid.UUID(hex=second_token)))
+    monkeypatch.setattr(
+        "recebako.runtime.files.uuid.uuid4",
+        lambda: next(tokens),
+    )
+
+    work_path = claim_inbox_file(candidate, paths)
+
+    assert work_path.name == f"work-{second_token}--receipt.jpg"
+    assert work_path.read_bytes() == b"new"
+    assert existing.read_bytes() == b"existing"
+
+
 def test_final_moves_use_status_date_and_do_not_overwrite(
     tmp_path: Path,
 ) -> None:
@@ -213,6 +303,100 @@ def test_final_moves_use_status_date_and_do_not_overwrite(
     assert archived.read_bytes() == b"new"
     assert existing.read_bytes() == b"existing"
     assert reviewed.relative_to(paths.root).as_posix() == "review/2_review.jpg"
+
+
+def test_final_move_retries_collision_created_during_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    work = paths.processing / f"work-{WORK_TOKEN}--receipt.jpg"
+    work.write_bytes(b"new")
+    original_link = os.link
+    collision_created = False
+
+    def racing_link(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        nonlocal collision_created
+        if not collision_created:
+            Path(destination).write_bytes(b"racer")
+            collision_created = True
+        original_link(source, destination, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr("recebako.runtime.files.os.link", racing_link)
+
+    destination = move_to_final(
+        work,
+        paths,
+        receipt_id=1,
+        status=ReceiptStatus.REVIEW,
+        date_value="",
+        fallback_date=date(2026, 8, 1),
+        original_name="receipt.jpg",
+    )
+
+    assert (paths.review / "1_receipt.jpg").read_bytes() == b"racer"
+    assert destination.name == "1_receipt.1.jpg"
+    assert destination.read_bytes() == b"new"
+
+
+def test_final_move_rejects_symlink_source(tmp_path: Path) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+    work = paths.processing / f"work-{WORK_TOKEN}--receipt.jpg"
+    work.symlink_to(outside)
+
+    with pytest.raises(RuntimeFileError, match="通常ファイル"):
+        move_to_final(
+            work,
+            paths,
+            receipt_id=1,
+            status=ReceiptStatus.REVIEW,
+            date_value="",
+            fallback_date=date(2026, 8, 1),
+            original_name="receipt.jpg",
+        )
+
+    assert work.is_symlink()
+    assert outside.read_bytes() == b"outside"
+    assert list(paths.review.iterdir()) == []
+
+
+def test_exclusive_move_preserves_original_link_when_source_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.jpg"
+    destination = tmp_path / "destination.jpg"
+    source.write_bytes(b"original")
+    original_link = os.link
+
+    def replacing_link(
+        source_path: Path,
+        destination_path: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        original_link(
+            source_path,
+            destination_path,
+            follow_symlinks=follow_symlinks,
+        )
+        Path(source_path).unlink()
+        Path(source_path).write_bytes(b"replacement")
+
+    monkeypatch.setattr("recebako.runtime.files.os.link", replacing_link)
+
+    with pytest.raises(RuntimeFileError, match="移動元の画像が置き換え"):
+        move_regular_file_no_overwrite(source, destination)
+
+    assert source.read_bytes() == b"replacement"
+    assert destination.read_bytes() == b"original"
 
 
 def test_confirmed_move_uses_fallback_date_when_receipt_date_is_invalid(
@@ -306,3 +490,57 @@ def test_failed_metadata_is_safe_json_and_collision_does_not_overwrite(
         "raw-response",
     ):
         assert forbidden not in serialized
+
+
+def test_failed_move_retries_collision_created_during_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    work = paths.processing / f"work-{WORK_TOKEN}--receipt.jpg"
+    work.write_bytes(b"failed-image")
+    original_link = os.link
+    collision_created = False
+
+    def racing_link(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        nonlocal collision_created
+        if not collision_created:
+            Path(destination).write_bytes(b"racer")
+            collision_created = True
+        original_link(source, destination, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr("recebako.runtime.files.os.link", racing_link)
+
+    destination = move_to_failed(
+        work,
+        paths,
+        source_filename="receipt.jpg",
+    )
+
+    assert (paths.failed / "receipt.jpg").read_bytes() == b"racer"
+    assert destination.name == "receipt.1.jpg"
+    assert destination.read_bytes() == b"failed-image"
+
+
+def test_failed_move_rejects_symlink_source(tmp_path: Path) -> None:
+    paths, _ = initialize_runtime(tmp_path / "data")
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+    work = paths.processing / f"work-{WORK_TOKEN}--receipt.jpg"
+    work.symlink_to(outside)
+
+    with pytest.raises(FailedMetadataError, match="failedへ移動"):
+        move_to_failed(
+            work,
+            paths,
+            source_filename="receipt.jpg",
+        )
+
+    assert work.is_symlink()
+    assert outside.read_bytes() == b"outside"
+    assert list(paths.failed.iterdir()) == []

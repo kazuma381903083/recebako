@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 from contextlib import closing
 from datetime import date
 from pathlib import Path
@@ -10,10 +11,10 @@ from pydantic import BaseModel, ConfigDict
 from recebako.config import AppConfig
 from recebako.runtime.files import (
     RuntimeFileError,
-    collision_free_path,
     final_directory,
     is_final_name_for_receipt,
     is_safe_existing_directory,
+    move_regular_file_with_collision_retry,
     move_to_final,
     original_name_from_work_name,
     preferred_final_name,
@@ -60,6 +61,76 @@ def _relative(paths: RuntimePaths, path: Path) -> str:
     return image_path_relative_to_root(paths.root, path)
 
 
+def _lexical_relative(paths: RuntimePaths, path: Path) -> str:
+    try:
+        relative = path.relative_to(paths.root)
+    except ValueError as exc:
+        raise ImagePathError("画像パスがdata.root配下ではありません") from exc
+    return validate_image_path(relative)
+
+
+def _safe_error_source(paths: RuntimePaths, path: Path) -> str:
+    try:
+        return _lexical_relative(paths, path)
+    except ImagePathError:
+        return paths.processing.name
+
+
+def _validate_dry_run_directory(paths: RuntimePaths, directory: Path) -> None:
+    try:
+        relative = directory.relative_to(paths.root)
+        validate_image_path(relative)
+    except (ImagePathError, ValueError) as exc:
+        raise RuntimeFileError("dry-runの移動先がdata.root外です") from exc
+
+    current = paths.root
+    for part in relative.parts:
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(mode):
+            raise RuntimeFileError(
+                "dry-runの移動先ディレクトリにシンボリックリンクがあります"
+            )
+        if not stat.S_ISDIR(mode):
+            raise RuntimeFileError("dry-runの移動先ディレクトリを安全に利用できません")
+
+
+def _path_exists_without_following_symlinks(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _dry_run_collision_free_path(directory: Path, preferred_name: str) -> Path:
+    preferred = directory / preferred_name
+    if not _path_exists_without_following_symlinks(preferred):
+        return preferred
+
+    suffix = Path(preferred_name).suffix
+    stem = preferred_name[: -len(suffix)] if suffix else preferred_name
+    counter = 1
+    while True:
+        candidate = directory / f"{stem}.{counter}{suffix}"
+        if not _path_exists_without_following_symlinks(candidate):
+            return candidate
+        counter += 1
+
+
+def _dry_run_destination(
+    paths: RuntimePaths,
+    directory: Path,
+    preferred_name: str,
+) -> tuple[Path, str]:
+    _validate_dry_run_directory(paths, directory)
+    destination = _dry_run_collision_free_path(directory, preferred_name)
+    return destination, _lexical_relative(paths, destination)
+
+
 def _recovery_error(
     *,
     action: str,
@@ -101,15 +172,25 @@ def _recover_processing_file(
 
     stored = repository.find_by_image_path(Path(source))
     if stored is None:
-        destination = collision_free_path(paths.inbox, original_name)
-        if not dry_run:
-            work_path.rename(destination)
+        if dry_run:
+            destination, relative_destination = _dry_run_destination(
+                paths,
+                paths.inbox,
+                original_name,
+            )
+        else:
+            destination = move_regular_file_with_collision_retry(
+                work_path,
+                paths.inbox,
+                original_name,
+            )
+            relative_destination = _relative(paths, destination)
         return (
             RecoveryItemResult(
                 action="return_to_inbox",
                 receipt_id=None,
                 source=source,
-                destination=_relative(paths, destination),
+                destination=relative_destination,
                 outcome="planned" if dry_run else "recovered",
             ),
             None,
@@ -122,7 +203,8 @@ def _recover_processing_file(
             date_value=stored.date,
             fallback_date=fallback_date,
         )
-        destination = collision_free_path(
+        destination, relative_destination = _dry_run_destination(
+            paths,
             directory,
             preferred_final_name(stored.id, original_name),
         )
@@ -136,16 +218,17 @@ def _recover_processing_file(
             fallback_date=fallback_date,
             original_name=original_name,
         )
-        repository.update_image_path(
+        repository.finalize_image_path(
             stored.id,
             Path(_relative(paths, destination)),
         )
+        relative_destination = _relative(paths, destination)
     return (
         RecoveryItemResult(
             action="complete_final_move",
             receipt_id=stored.id,
             source=source,
-            destination=_relative(paths, destination),
+            destination=relative_destination,
             outcome="planned" if dry_run else "recovered",
         ),
         stored.id,
@@ -222,7 +305,7 @@ def _repair_missing_processing_path(
 
     destination = candidates[0]
     if not dry_run:
-        repository.update_image_path(
+        repository.finalize_image_path(
             stored.id,
             Path(_relative(paths, destination)),
         )
@@ -283,11 +366,11 @@ def recover_runtime(
                     code="recovery.filesystem",
                 )
                 receipt_id = None
-            except RuntimeFileError:
+            except (ImagePathError, RuntimeFileError):
                 result = _recovery_error(
                     action="recover_processing",
                     receipt_id=None,
-                    source=_relative(paths, work_path),
+                    source=_safe_error_source(paths, work_path),
                     code="recovery.invalid_transition",
                 )
                 receipt_id = None
@@ -334,6 +417,13 @@ def recover_runtime(
                     receipt_id=stored.id,
                     source=stored.image_path,
                     code="recovery.filesystem",
+                )
+            except ImagePathError:
+                result = _recovery_error(
+                    action="repair_database_path",
+                    receipt_id=stored.id,
+                    source=stored.image_path,
+                    code="recovery.invalid_transition",
                 )
             results.append(result)
 

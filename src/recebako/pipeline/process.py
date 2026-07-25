@@ -11,6 +11,7 @@ from recebako.ai import request_receipt_extraction
 from recebako.config import AppConfig
 from recebako.domain import (
     IngestMode,
+    ReceiptFileState,
     ReceiptStatus,
     ValidationIssue,
     ValidationResult,
@@ -60,7 +61,8 @@ def process_receipt(
     config: AppConfig,
     mode: IngestMode,
     reference_date: date,
-    storage_image_path: Path | None = None,
+    storage_image_path: Path,
+    file_state: ReceiptFileState = ReceiptFileState.FINALIZED,
     temporary_root: Path | None = None,
 ) -> ProcessResult:
     with preprocess_image(
@@ -79,10 +81,6 @@ def process_receipt(
             mode=mode,
         )
         phash = preprocessed.phash
-    persisted_image_path = storage_image_path or (
-        Path("unmanaged") / f"{phash}_{image_path.name}"
-    )
-
     try:
         initialize_database(config.data.root)
         with closing(connect_database(config.data.root)) as connection:
@@ -107,12 +105,13 @@ def process_receipt(
                     extraction=extraction,
                     validation=validation,
                     phash=phash,
-                    image_path=persisted_image_path,
+                    image_path=storage_image_path,
                     ingest_mode=mode,
                     raw_payload=raw_payload,
                     duplicate_of_id=(
                         duplicate.receipt_id if duplicate is not None else None
                     ),
+                    file_state=file_state,
                 )
             )
     except (MigrationError, StorageError):
