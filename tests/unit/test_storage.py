@@ -183,6 +183,74 @@ def test_json_fields_are_saved_and_restored(
     assert stored.raw_payload == {"source": "ollama"}
 
 
+def test_existing_tables_preserve_tax_normalization_audit_trail(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    stored = ReceiptRepository(connection).get(
+        ReceiptRepository(connection).save(_write(tmp_path))
+    )
+
+    assert stored is not None
+    assigned_items = [
+        (
+            index,
+            item.price_raw,
+            item.tax_adjustment,
+            item.price,
+            item.tax_rate,
+        )
+        for index, item in enumerate(stored.items)
+        if item.tax_treatment.value == "excluded" and item.tax_rate is not None
+    ]
+    assert assigned_items == [(0, 140, 11, 151, 8)]
+    assert [
+        (
+            breakdown.tax_rate,
+            breakdown.taxable_amount,
+            breakdown.tax_amount,
+        )
+        for breakdown in stored.tax_breakdowns
+    ] == [(8, 140, 11), (10, 570, 51)]
+
+
+def test_tax_normalization_rejection_reason_uses_existing_json_field(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    record = _write(tmp_path)
+    record = ReceiptWrite(
+        extraction=record.extraction,
+        validation=ValidationResult(
+            status=ReceiptStatus.REVIEW,
+            issues=[
+                ValidationIssue(
+                    code="tax.normalization.search_limit",
+                    message="外税補正の探索上限に達したため補正を拒否しました",
+                    field="tax_breakdowns",
+                )
+            ],
+        ),
+        phash=record.phash,
+        image_path=record.image_path,
+        ingest_mode=record.ingest_mode,
+        raw_payload=record.raw_payload,
+    )
+
+    stored = ReceiptRepository(connection).get(
+        ReceiptRepository(connection).save(record)
+    )
+
+    assert stored is not None
+    assert stored.validation_issues == [
+        {
+            "code": "tax.normalization.search_limit",
+            "message": "外税補正の探索上限に達したため補正を拒否しました",
+            "field": "tax_breakdowns",
+        }
+    ]
+
+
 def test_item_failure_rolls_back_receipt(
     connection: sqlite3.Connection,
     tmp_path: Path,

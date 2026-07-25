@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+import recebako.normalization.tax as tax_module
 from recebako.domain import IngestMode, ReceiptExtraction, ReceiptStatus
 from recebako.validation import validate_receipt, validate_receipt_payload
 
@@ -240,7 +241,142 @@ def test_missing_external_tax_breakdown_remains_review() -> None:
     )
 
     assert result.status is ReceiptStatus.REVIEW
-    assert {issue.code for issue in result.issues} == {"total.mismatch"}
+    assert {issue.code for issue in result.issues} == {
+        "tax.normalization.missing_evidence",
+        "total.mismatch",
+    }
+
+
+def test_tax_normalization_refusal_reason_is_auditable() -> None:
+    result = validate_receipt(
+        _receipt(
+            items=[
+                {
+                    "name": "外税商品",
+                    "price": 100,
+                    "price_raw": 100,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            tax_breakdowns=[
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": -100,
+                    "tax_amount": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            total=108,
+        ),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.status is ReceiptStatus.REVIEW
+    assert {issue.code for issue in result.issues} == {
+        "tax.normalization.inconsistent",
+        "total.mismatch",
+    }
+
+
+def test_tax_normalization_requires_exact_corrected_total() -> None:
+    result = validate_receipt(
+        _receipt(
+            items=[
+                {
+                    "name": "外税商品",
+                    "price": 100,
+                    "price_raw": 100,
+                    "tax_rate": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            tax_breakdowns=[
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": 100,
+                    "tax_amount": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            total=109,
+        ),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.status is ReceiptStatus.REVIEW
+    assert {issue.code for issue in result.issues} == {
+        "tax.normalization.total_mismatch",
+        "total.mismatch",
+    }
+
+
+def test_tax_rejection_is_review_even_within_business_total_tolerance() -> None:
+    result = validate_receipt(
+        _receipt(
+            items=[
+                {
+                    "name": "外税商品",
+                    "price": 100,
+                    "price_raw": 100,
+                    "tax_rate": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            tax_breakdowns=[
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": 100,
+                    "tax_amount": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            total=102,
+        ),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.status is ReceiptStatus.REVIEW
+    assert {issue.code for issue in result.issues} == {
+        "tax.normalization.total_mismatch"
+    }
+
+
+def test_tax_search_limit_becomes_review_instead_of_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tax_module, "MAX_SUBSET_SUM_STATES", 2)
+
+    result = validate_receipt(
+        _receipt(
+            items=[
+                {
+                    "name": f"外税商品{index}",
+                    "price": 50,
+                    "price_raw": 50,
+                    "tax_rate": None,
+                    "tax_treatment": "excluded",
+                }
+                for index in range(3)
+            ],
+            tax_breakdowns=[
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": 100,
+                    "tax_amount": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            total=158,
+        ),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.status is ReceiptStatus.REVIEW
+    assert {issue.code for issue in result.issues} == {
+        "tax.normalization.search_limit",
+        "total.mismatch",
+    }
 
 
 def test_unique_subtotals_resolve_multiple_external_tax_rates() -> None:
@@ -347,7 +483,10 @@ def test_ambiguous_subtotal_match_remains_review() -> None:
     )
 
     assert result.status is ReceiptStatus.REVIEW
-    assert {issue.code for issue in result.issues} == {"total.mismatch"}
+    assert {issue.code for issue in result.issues} == {
+        "tax.normalization.ambiguous",
+        "total.mismatch",
+    }
 
 
 @pytest.mark.parametrize(

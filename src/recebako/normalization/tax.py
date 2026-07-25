@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
+from enum import Enum
 from fractions import Fraction
-from itertools import combinations
 
 from recebako.domain import (
     NormalizedReceiptItem,
@@ -14,13 +15,73 @@ from recebako.domain import (
 TAXABLE_AMOUNT_TOLERANCE_YEN = 2
 MAX_SUBSET_SUM_STATES = 20_000
 MAX_EXTERNAL_GROUPS = 8
+SUPPORTED_EXTERNAL_TAX_RATES = frozenset({8, 10})
+
+
+class TaxNormalizationReason(str, Enum):
+    APPLIED = "applied"
+    NOT_NEEDED = "not_needed"
+    MISSING_EVIDENCE = "missing_evidence"
+    INCONSISTENT_INPUT = "inconsistent_input"
+    NO_MATCH = "no_match"
+    AMBIGUOUS = "ambiguous"
+    TOTAL_MISMATCH = "total_mismatch"
+    SEARCH_LIMIT = "search_limit"
+    GROUP_LIMIT = "group_limit"
+    ALLOCATION_FAILED = "allocation_failed"
+
+
+@dataclass(frozen=True)
+class TaxGroupAssignment:
+    tax_rate: int
+    taxable_amount: int
+    tax_amount: int
+    item_indexes: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class TaxNormalizationAudit:
+    applied: bool
+    reason: TaxNormalizationReason
+    assignments: tuple[TaxGroupAssignment, ...]
+    search_states: int
+    search_limit_reached: bool
+    evidence_present: bool
+
+
+@dataclass(frozen=True)
+class TaxNormalizationResult:
+    items: list[NormalizedReceiptItem]
+    audit: TaxNormalizationAudit
+
+
+@dataclass(frozen=True)
+class _ExternalTaxGroup:
+    tax_rate: int
+    taxable_amount: int
+    tax_amount: int
 
 
 @dataclass(frozen=True)
 class _TaxGroupCandidate:
     tax_rate: int
+    taxable_amount: int
     indexes: tuple[int, ...]
     tax_amount: int
+
+
+@dataclass
+class _SearchBudget:
+    maximum: int
+    states: int = 0
+    limit_reached: bool = False
+
+    def consume(self) -> bool:
+        if self.states >= self.maximum:
+            self.limit_reached = True
+            return False
+        self.states += 1
+        return True
 
 
 def _raw_price(item: ReceiptItem) -> int:
@@ -37,7 +98,7 @@ def _base_normalized_item(item: ReceiptItem) -> NormalizedReceiptItem:
 
 def _allocate_tax(raw_prices: list[int], tax_amount: int) -> list[int] | None:
     taxable_amount = sum(raw_prices)
-    if not raw_prices or taxable_amount == 0:
+    if not raw_prices or taxable_amount <= 0 or tax_amount < 0:
         return None
 
     exact_allocations = [
@@ -70,154 +131,312 @@ def _allocate_tax(raw_prices: list[int], tax_amount: int) -> list[int] | None:
     return allocations
 
 
-def _external_breakdowns_by_rate(
+def _external_groups(
     breakdowns: list[ReceiptTaxBreakdown],
-) -> dict[int, tuple[int, int]]:
+) -> tuple[list[_ExternalTaxGroup], TaxNormalizationReason | None]:
+    external = [
+        breakdown
+        for breakdown in breakdowns
+        if breakdown.tax_treatment is TaxTreatment.EXCLUDED
+    ]
+    if len(external) > MAX_EXTERNAL_GROUPS:
+        return [], TaxNormalizationReason.GROUP_LIMIT
+
+    if any(
+        breakdown.tax_rate not in SUPPORTED_EXTERNAL_TAX_RATES
+        or breakdown.taxable_amount < 0
+        or breakdown.tax_amount < 0
+        for breakdown in external
+    ):
+        return [], TaxNormalizationReason.INCONSISTENT_INPUT
+
     grouped: dict[int, tuple[int, int]] = {}
-    for breakdown in breakdowns:
-        if breakdown.tax_treatment is not TaxTreatment.EXCLUDED:
-            continue
+    for breakdown in sorted(
+        external,
+        key=lambda value: (
+            value.tax_rate,
+            value.taxable_amount,
+            value.tax_amount,
+        ),
+    ):
         taxable_amount, tax_amount = grouped.get(breakdown.tax_rate, (0, 0))
         grouped[breakdown.tax_rate] = (
             taxable_amount + breakdown.taxable_amount,
             tax_amount + breakdown.tax_amount,
         )
-    return grouped
+
+    return [
+        _ExternalTaxGroup(
+            tax_rate=tax_rate,
+            taxable_amount=taxable_amount,
+            tax_amount=tax_amount,
+        )
+        for tax_rate, (taxable_amount, tax_amount) in sorted(grouped.items())
+    ], None
 
 
-def _unique_subset_for_targets(
+def _has_allowed_amount_in_range(
+    allowed_amounts: list[int],
+    minimum: int,
+    maximum: int,
+) -> bool:
+    position = bisect_left(allowed_amounts, minimum)
+    return position < len(allowed_amounts) and allowed_amounts[position] <= maximum
+
+
+def _matching_subsets(
     indexes: list[int],
     items: list[ReceiptItem],
     targets: set[int],
-) -> tuple[int, ...] | None:
-    states: dict[int, tuple[int, ...] | None] = {0: ()}
-    missing = object()
+    *,
+    budget: _SearchBudget,
+) -> set[tuple[int, ...]]:
+    allowed_amounts = sorted(
+        {
+            amount
+            for target in targets
+            for amount in range(
+                target - TAXABLE_AMOUNT_TOLERANCE_YEN,
+                target + TAXABLE_AMOUNT_TOLERANCE_YEN + 1,
+            )
+        }
+    )
+    if not allowed_amounts:
+        return set()
 
-    for index in indexes:
-        updated = dict(states)
-        for current_sum, subset in states.items():
-            next_sum = current_sum + _raw_price(items[index])
-            candidate = None if subset is None else (*subset, index)
-            existing = updated.get(next_sum, missing)
-            if existing is missing:
-                updated[next_sum] = candidate
-            elif existing != candidate:
-                updated[next_sum] = None
-        if len(updated) > MAX_SUBSET_SUM_STATES:
-            return None
-        states = updated
+    ordered_indexes = sorted(indexes)
+    raw_prices = [_raw_price(items[index]) for index in ordered_indexes]
+    suffix_minimum = [0] * (len(raw_prices) + 1)
+    suffix_maximum = [0] * (len(raw_prices) + 1)
+    for position in range(len(raw_prices) - 1, -1, -1):
+        raw_price = raw_prices[position]
+        suffix_minimum[position] = suffix_minimum[position + 1] + min(raw_price, 0)
+        suffix_maximum[position] = suffix_maximum[position + 1] + max(raw_price, 0)
 
     matches: set[tuple[int, ...]] = set()
-    for target in targets:
-        for amount in range(
-            target - TAXABLE_AMOUNT_TOLERANCE_YEN,
-            target + TAXABLE_AMOUNT_TOLERANCE_YEN + 1,
+
+    def search(
+        position: int,
+        current_sum: int,
+        selected: tuple[int, ...],
+    ) -> None:
+        if budget.limit_reached or not budget.consume():
+            return
+        if not _has_allowed_amount_in_range(
+            allowed_amounts,
+            current_sum + suffix_minimum[position],
+            current_sum + suffix_maximum[position],
         ):
-            if amount not in states:
-                continue
-            subset = states[amount]
-            if subset is None:
-                return None
-            matches.add(subset)
+            return
+        if position == len(ordered_indexes):
+            if current_sum in allowed_amounts:
+                matches.add(selected)
+            return
 
-    if len(matches) != 1:
-        return None
-    return next(iter(matches))
+        search(position + 1, current_sum, selected)
+        index = ordered_indexes[position]
+        search(
+            position + 1,
+            current_sum + raw_prices[position],
+            (*selected, index),
+        )
+
+    search(0, 0, ())
+    return matches
 
 
-def _candidate_for_breakdown(
-    tax_rate: int,
-    stated_taxable_amount: int,
-    stated_tax_amount: int,
+def _plausible_group_totals(group: _ExternalTaxGroup) -> set[int]:
+    if group.tax_amount == 0:
+        return set()
+
+    possible_totals = {
+        group.taxable_amount,
+        group.taxable_amount - group.tax_amount,
+    }
+    return {
+        possible_total
+        for possible_total in possible_totals
+        if possible_total >= 0
+        and abs(Fraction(possible_total * group.tax_rate, 100) - group.tax_amount)
+        <= TAXABLE_AMOUNT_TOLERANCE_YEN
+    }
+
+
+def _candidates_for_group(
+    group: _ExternalTaxGroup,
     items: list[ReceiptItem],
     unknown_rate_indexes: list[int],
-) -> _TaxGroupCandidate | None:
+    *,
+    budget: _SearchBudget,
+) -> list[_TaxGroupCandidate]:
+    possible_group_totals = _plausible_group_totals(group)
+    if not possible_group_totals:
+        return []
+
     known_rate_indexes = [
         index
         for index, item in enumerate(items)
         if item.tax_treatment is TaxTreatment.EXCLUDED
-        and item.tax_rate == tax_rate
+        and item.tax_rate == group.tax_rate
         and item.price_raw is not None
     ]
-    has_incomplete_known_item = any(
+    if any(
         item.tax_treatment is TaxTreatment.EXCLUDED
-        and item.tax_rate == tax_rate
+        and item.tax_rate == group.tax_rate
         and item.price_raw is None
         for item in items
-    )
-    if has_incomplete_known_item:
-        return None
+    ):
+        return []
 
     known_total = sum(_raw_price(items[index]) for index in known_rate_indexes)
-    possible_group_totals = {
-        stated_taxable_amount,
-        stated_taxable_amount - stated_tax_amount,
-    }
     remaining_targets = {
         group_total - known_total for group_total in possible_group_totals
     }
-    unknown_subset = _unique_subset_for_targets(
+    unknown_subsets = _matching_subsets(
         unknown_rate_indexes,
         items,
         remaining_targets,
+        budget=budget,
     )
-    if unknown_subset is None:
-        return None
-
-    group_indexes = tuple(sorted((*known_rate_indexes, *unknown_subset)))
-    if not group_indexes:
-        return None
-    return _TaxGroupCandidate(
-        tax_rate=tax_rate,
-        indexes=group_indexes,
-        tax_amount=stated_tax_amount,
+    candidates = {
+        _TaxGroupCandidate(
+            tax_rate=group.tax_rate,
+            taxable_amount=group.taxable_amount,
+            indexes=tuple(sorted((*known_rate_indexes, *unknown_subset))),
+            tax_amount=group.tax_amount,
+        )
+        for unknown_subset in unknown_subsets
+        if known_rate_indexes or unknown_subset
+    }
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate.tax_rate,
+            candidate.indexes,
+            candidate.taxable_amount,
+            candidate.tax_amount,
+        ),
     )
 
 
 def _select_groups_for_total(
-    candidates: list[_TaxGroupCandidate],
+    candidates_by_rate: list[tuple[int, list[_TaxGroupCandidate]]],
     *,
     raw_total: int,
     total: int,
-) -> tuple[_TaxGroupCandidate, ...]:
-    if abs(raw_total - total) <= TAXABLE_AMOUNT_TOLERANCE_YEN:
-        return ()
-    if len(candidates) > MAX_EXTERNAL_GROUPS:
-        return ()
-
+    budget: _SearchBudget,
+) -> tuple[tuple[_TaxGroupCandidate, ...], TaxNormalizationReason]:
     best_error: int | None = None
-    best_selections: list[tuple[_TaxGroupCandidate, ...]] = []
-    for selection_size in range(1, len(candidates) + 1):
-        for selection in combinations(candidates, selection_size):
-            indexes = [index for candidate in selection for index in candidate.indexes]
-            if len(indexes) != len(set(indexes)):
-                continue
+    best_selections: set[tuple[_TaxGroupCandidate, ...]] = set()
 
-            adjusted_total = raw_total + sum(
-                candidate.tax_amount for candidate in selection
+    def search(
+        position: int,
+        selected: tuple[_TaxGroupCandidate, ...],
+        used_indexes: frozenset[int],
+    ) -> None:
+        nonlocal best_error, best_selections
+        if budget.limit_reached or not budget.consume():
+            return
+        if position == len(candidates_by_rate):
+            if not selected:
+                return
+            error = abs(
+                raw_total + sum(candidate.tax_amount for candidate in selected) - total
             )
-            error = abs(adjusted_total - total)
-            if error > TAXABLE_AMOUNT_TOLERANCE_YEN:
-                continue
             if best_error is None or error < best_error:
                 best_error = error
-                best_selections = [selection]
+                best_selections = {selected}
             elif error == best_error:
-                best_selections.append(selection)
+                best_selections.add(selected)
+            return
 
+        search(position + 1, selected, used_indexes)
+        _, candidates = candidates_by_rate[position]
+        for candidate in candidates:
+            candidate_indexes = frozenset(candidate.indexes)
+            if used_indexes.isdisjoint(candidate_indexes):
+                search(
+                    position + 1,
+                    (*selected, candidate),
+                    used_indexes | candidate_indexes,
+                )
+
+    search(0, (), frozenset())
+    if budget.limit_reached:
+        return (), TaxNormalizationReason.SEARCH_LIMIT
+    if best_error is None:
+        return (), TaxNormalizationReason.NO_MATCH
     if len(best_selections) != 1:
-        return ()
-    return best_selections[0]
+        return (), TaxNormalizationReason.AMBIGUOUS
+    if best_error != 0:
+        return (), TaxNormalizationReason.TOTAL_MISMATCH
+    return next(iter(best_selections)), TaxNormalizationReason.APPLIED
 
 
-def normalize_item_taxes(
+def _audit(
+    reason: TaxNormalizationReason,
+    *,
+    budget: _SearchBudget,
+    evidence_present: bool,
+    assignments: tuple[TaxGroupAssignment, ...] = (),
+) -> TaxNormalizationAudit:
+    return TaxNormalizationAudit(
+        applied=reason is TaxNormalizationReason.APPLIED,
+        reason=reason,
+        assignments=assignments,
+        search_states=budget.states,
+        search_limit_reached=(
+            budget.limit_reached or reason is TaxNormalizationReason.GROUP_LIMIT
+        ),
+        evidence_present=evidence_present,
+    )
+
+
+def normalize_item_taxes_with_audit(
     items: list[ReceiptItem],
     breakdowns: list[ReceiptTaxBreakdown],
     *,
     total: int,
-) -> list[NormalizedReceiptItem]:
+) -> TaxNormalizationResult:
     normalized = [_base_normalized_item(item) for item in items]
-    external_breakdowns = _external_breakdowns_by_rate(breakdowns)
+    raw_total = sum(_raw_price(item) for item in items)
+    evidence_present = any(
+        item.tax_treatment is TaxTreatment.EXCLUDED for item in items
+    ) or any(
+        breakdown.tax_treatment is TaxTreatment.EXCLUDED for breakdown in breakdowns
+    )
+    budget = _SearchBudget(MAX_SUBSET_SUM_STATES)
+
+    if raw_total == total:
+        return TaxNormalizationResult(
+            items=normalized,
+            audit=_audit(
+                TaxNormalizationReason.NOT_NEEDED,
+                budget=budget,
+                evidence_present=evidence_present,
+            ),
+        )
+
+    external_groups, input_error = _external_groups(breakdowns)
+    if input_error is not None:
+        return TaxNormalizationResult(
+            items=normalized,
+            audit=_audit(
+                input_error,
+                budget=budget,
+                evidence_present=evidence_present,
+            ),
+        )
+    if not external_groups:
+        return TaxNormalizationResult(
+            items=normalized,
+            audit=_audit(
+                TaxNormalizationReason.MISSING_EVIDENCE,
+                budget=budget,
+                evidence_present=evidence_present,
+            ),
+        )
+
     unknown_rate_indexes = [
         index
         for index, item in enumerate(items)
@@ -225,33 +444,57 @@ def normalize_item_taxes(
         and item.tax_rate is None
         and item.price_raw is not None
     ]
-    candidates = [
-        candidate
-        for tax_rate, (stated_taxable_amount, stated_tax_amount) in (
-            external_breakdowns.items()
-        )
-        if (
-            candidate := _candidate_for_breakdown(
-                tax_rate,
-                stated_taxable_amount,
-                stated_tax_amount,
+    candidates_by_rate = [
+        (
+            group.tax_rate,
+            _candidates_for_group(
+                group,
                 items,
                 unknown_rate_indexes,
-            )
+                budget=budget,
+            ),
         )
-        is not None
+        for group in external_groups
     ]
-    selected_groups = _select_groups_for_total(
-        candidates,
-        raw_total=sum(_raw_price(item) for item in items),
-        total=total,
-    )
+    if budget.limit_reached:
+        return TaxNormalizationResult(
+            items=normalized,
+            audit=_audit(
+                TaxNormalizationReason.SEARCH_LIMIT,
+                budget=budget,
+                evidence_present=evidence_present,
+            ),
+        )
 
+    selected_groups, reason = _select_groups_for_total(
+        candidates_by_rate,
+        raw_total=raw_total,
+        total=total,
+        budget=budget,
+    )
+    if reason is not TaxNormalizationReason.APPLIED:
+        return TaxNormalizationResult(
+            items=normalized,
+            audit=_audit(
+                reason,
+                budget=budget,
+                evidence_present=evidence_present,
+            ),
+        )
+
+    assignments: list[TaxGroupAssignment] = []
     for group in selected_groups:
         raw_prices = [_raw_price(items[index]) for index in group.indexes]
         allocations = _allocate_tax(raw_prices, group.tax_amount)
         if allocations is None:
-            continue
+            return TaxNormalizationResult(
+                items=[_base_normalized_item(item) for item in items],
+                audit=_audit(
+                    TaxNormalizationReason.ALLOCATION_FAILED,
+                    budget=budget,
+                    evidence_present=evidence_present,
+                ),
+            )
 
         for index, adjustment in zip(group.indexes, allocations, strict=True):
             item = normalized[index]
@@ -262,5 +505,44 @@ def normalize_item_taxes(
                     "tax_adjustment": adjustment,
                 }
             )
+        assignments.append(
+            TaxGroupAssignment(
+                tax_rate=group.tax_rate,
+                taxable_amount=group.taxable_amount,
+                tax_amount=group.tax_amount,
+                item_indexes=group.indexes,
+            )
+        )
 
-    return normalized
+    if sum(item.price for item in normalized) != total:
+        return TaxNormalizationResult(
+            items=[_base_normalized_item(item) for item in items],
+            audit=_audit(
+                TaxNormalizationReason.TOTAL_MISMATCH,
+                budget=budget,
+                evidence_present=evidence_present,
+            ),
+        )
+
+    return TaxNormalizationResult(
+        items=normalized,
+        audit=_audit(
+            TaxNormalizationReason.APPLIED,
+            budget=budget,
+            evidence_present=evidence_present,
+            assignments=tuple(assignments),
+        ),
+    )
+
+
+def normalize_item_taxes(
+    items: list[ReceiptItem],
+    breakdowns: list[ReceiptTaxBreakdown],
+    *,
+    total: int,
+) -> list[NormalizedReceiptItem]:
+    return normalize_item_taxes_with_audit(
+        items,
+        breakdowns,
+        total=total,
+    ).items

@@ -12,7 +12,12 @@ from recebako.domain import (
     ValidationIssue,
     ValidationResult,
 )
-from recebako.normalization import normalize_item_taxes, normalize_receipt_date
+from recebako.normalization import (
+    TaxNormalizationAudit,
+    TaxNormalizationReason,
+    normalize_item_taxes_with_audit,
+    normalize_receipt_date,
+)
 
 MINIMUM_CONFIDENCE = 0.8
 TOTAL_TOLERANCE_YEN = 2
@@ -36,19 +41,78 @@ def _parse_receipt_date(value: str) -> date | None:
 def normalize_receipt(
     receipt: ReceiptExtraction,
 ) -> NormalizedReceiptExtraction:
+    normalized_receipt, _ = _normalize_receipt_with_tax_audit(receipt)
+    return normalized_receipt
+
+
+def _normalize_receipt_with_tax_audit(
+    receipt: ReceiptExtraction,
+) -> tuple[NormalizedReceiptExtraction, TaxNormalizationAudit]:
     normalization = normalize_receipt_date(receipt.date)
+    tax_normalization = normalize_item_taxes_with_audit(
+        list(receipt.items),
+        receipt.tax_breakdowns,
+        total=receipt.total,
+    )
     data = receipt.model_dump(mode="python")
-    data["items"] = [
-        item.model_dump(mode="python")
-        for item in normalize_item_taxes(
-            list(receipt.items),
-            receipt.tax_breakdowns,
-            total=receipt.total,
-        )
-    ]
+    data["items"] = [item.model_dump(mode="python") for item in tax_normalization.items]
     data["date_raw"] = normalization.raw
     data["date"] = normalization.normalized or ""
-    return NormalizedReceiptExtraction.model_validate(data)
+    return (
+        NormalizedReceiptExtraction.model_validate(data),
+        tax_normalization.audit,
+    )
+
+
+def _tax_normalization_issue(
+    audit: TaxNormalizationAudit,
+) -> ValidationIssue | None:
+    if (
+        audit.applied
+        or audit.reason is TaxNormalizationReason.NOT_NEEDED
+        or not audit.evidence_present
+    ):
+        return None
+
+    issue_details = {
+        TaxNormalizationReason.MISSING_EVIDENCE: (
+            "tax.normalization.missing_evidence",
+            "外税補正に必要な明示的な税内訳がありません",
+        ),
+        TaxNormalizationReason.INCONSISTENT_INPUT: (
+            "tax.normalization.inconsistent",
+            "税内訳に矛盾する値があるため外税補正を拒否しました",
+        ),
+        TaxNormalizationReason.NO_MATCH: (
+            "tax.normalization.no_match",
+            "税対象額と一致する安全な品目割当がありません",
+        ),
+        TaxNormalizationReason.AMBIGUOUS: (
+            "tax.normalization.ambiguous",
+            "外税補正の最良候補が一意に決まらないため補正を拒否しました",
+        ),
+        TaxNormalizationReason.TOTAL_MISMATCH: (
+            "tax.normalization.total_mismatch",
+            "外税候補を適用してもレシート合計と一致しません",
+        ),
+        TaxNormalizationReason.SEARCH_LIMIT: (
+            "tax.normalization.search_limit",
+            "外税補正の探索上限に達したため補正を拒否しました",
+        ),
+        TaxNormalizationReason.GROUP_LIMIT: (
+            "tax.normalization.search_limit",
+            "外税グループ数が探索上限を超えたため補正を拒否しました",
+        ),
+        TaxNormalizationReason.ALLOCATION_FAILED: (
+            "tax.normalization.allocation_failed",
+            "外税額を安全に配賦できないため補正を拒否しました",
+        ),
+    }
+    details = issue_details.get(audit.reason)
+    if details is None:
+        return None
+    code, message = details
+    return _issue(code, message, "tax_breakdowns")
 
 
 def _validate_normalized_receipt(
@@ -56,6 +120,7 @@ def _validate_normalized_receipt(
     *,
     reference_date: date,
     mode: IngestMode,
+    tax_audit: TaxNormalizationAudit | None = None,
 ) -> ValidationResult:
     issues: list[ValidationIssue] = []
 
@@ -124,6 +189,10 @@ def _validate_normalized_receipt(
         )
 
     item_total = sum(item.price for item in receipt.items)
+    if tax_audit is not None:
+        tax_issue = _tax_normalization_issue(tax_audit)
+        if tax_issue is not None:
+            issues.append(tax_issue)
     if abs(item_total - receipt.total) > TOTAL_TOLERANCE_YEN:
         issues.append(
             _issue(
@@ -143,11 +212,12 @@ def validate_receipt(
     reference_date: date,
     mode: IngestMode = IngestMode.REGULAR,
 ) -> ValidationResult:
-    normalized_receipt = normalize_receipt(receipt)
+    normalized_receipt, tax_audit = _normalize_receipt_with_tax_audit(receipt)
     return _validate_normalized_receipt(
         normalized_receipt,
         reference_date=reference_date,
         mode=mode,
+        tax_audit=tax_audit,
     )
 
 
@@ -171,9 +241,10 @@ def validate_receipt_payload(
             ],
         )
 
-    normalized_receipt = normalize_receipt(receipt)
+    normalized_receipt, tax_audit = _normalize_receipt_with_tax_audit(receipt)
     return normalized_receipt, _validate_normalized_receipt(
         normalized_receipt,
         reference_date=reference_date,
         mode=mode,
+        tax_audit=tax_audit,
     )
