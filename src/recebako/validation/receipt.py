@@ -5,11 +5,14 @@ from datetime import date, timedelta
 from pydantic import ValidationError
 
 from recebako.domain import (
+    IngestMode,
+    NormalizedReceiptExtraction,
     ReceiptExtraction,
     ReceiptStatus,
     ValidationIssue,
     ValidationResult,
 )
+from recebako.normalization import normalize_item_taxes, normalize_receipt_date
 
 MINIMUM_CONFIDENCE = 0.8
 TOTAL_TOLERANCE_YEN = 2
@@ -30,10 +33,25 @@ def _parse_receipt_date(value: str) -> date | None:
     return parsed
 
 
-def validate_receipt(
+def normalize_receipt(
     receipt: ReceiptExtraction,
+) -> NormalizedReceiptExtraction:
+    normalization = normalize_receipt_date(receipt.date)
+    data = receipt.model_dump(mode="python")
+    data["items"] = [
+        item.model_dump(mode="python")
+        for item in normalize_item_taxes(list(receipt.items), receipt.tax_breakdowns)
+    ]
+    data["date_raw"] = normalization.raw
+    data["date"] = normalization.normalized or ""
+    return NormalizedReceiptExtraction.model_validate(data)
+
+
+def _validate_normalized_receipt(
+    receipt: NormalizedReceiptExtraction,
     *,
     reference_date: date,
+    mode: IngestMode,
 ) -> ValidationResult:
     issues: list[ValidationIssue] = []
 
@@ -72,7 +90,9 @@ def validate_receipt(
                 "date",
             )
         )
-    elif receipt_date < reference_date - timedelta(days=MAX_RECEIPT_AGE_DAYS):
+    elif mode is IngestMode.REGULAR and receipt_date < reference_date - timedelta(
+        days=MAX_RECEIPT_AGE_DAYS
+    ):
         issues.append(
             _issue(
                 "date.too_old",
@@ -113,11 +133,26 @@ def validate_receipt(
     return ValidationResult(status=status, issues=issues)
 
 
+def validate_receipt(
+    receipt: ReceiptExtraction,
+    *,
+    reference_date: date,
+    mode: IngestMode = IngestMode.REGULAR,
+) -> ValidationResult:
+    normalized_receipt = normalize_receipt(receipt)
+    return _validate_normalized_receipt(
+        normalized_receipt,
+        reference_date=reference_date,
+        mode=mode,
+    )
+
+
 def validate_receipt_payload(
     payload: str | bytes | bytearray,
     *,
     reference_date: date,
-) -> tuple[ReceiptExtraction | None, ValidationResult]:
+    mode: IngestMode = IngestMode.REGULAR,
+) -> tuple[NormalizedReceiptExtraction | None, ValidationResult]:
     try:
         receipt = ReceiptExtraction.model_validate_json(payload)
     except ValidationError:
@@ -132,4 +167,9 @@ def validate_receipt_payload(
             ],
         )
 
-    return receipt, validate_receipt(receipt, reference_date=reference_date)
+    normalized_receipt = normalize_receipt(receipt)
+    return normalized_receipt, _validate_normalized_receipt(
+        normalized_receipt,
+        reference_date=reference_date,
+        mode=mode,
+    )

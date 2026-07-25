@@ -1,4 +1,13 @@
-from recebako.domain.receipt import PaymentMethod, ReceiptExtraction, ReceiptItem
+from recebako.domain.ingest import IngestMode
+from recebako.domain.receipt import (
+    NormalizedReceiptExtraction,
+    NormalizedReceiptItem,
+    PaymentMethod,
+    ReceiptExtraction,
+    ReceiptItem,
+    ReceiptTaxBreakdown,
+    TaxTreatment,
+)
 from recebako.domain.validation import (
     ReceiptStatus,
     ValidationIssue,
@@ -6,10 +15,15 @@ from recebako.domain.validation import (
 )
 
 __all__ = [
+    "IngestMode",
+    "NormalizedReceiptExtraction",
+    "NormalizedReceiptItem",
     "PaymentMethod",
     "ReceiptExtraction",
     "ReceiptItem",
     "ReceiptStatus",
+    "ReceiptTaxBreakdown",
+    "TaxTreatment",
     "ValidationIssue",
     "ValidationResult",
 ]
