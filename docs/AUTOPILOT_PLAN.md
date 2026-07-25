@@ -68,7 +68,7 @@ human-verifiedな正解がない場合は達成済みとしない。
 | NFR-Q2 店名・日付95%以上 | `requires_user_decision` | human verified truthなし | G09、G42 |
 | NFR-Q3 品目80%以上 | `requires_user_decision` | human verified truthなし | G09、G42 |
 | NFR-Q4 誤確定2%以下 | `requires_user_decision` | verified totalなし | G09、G42 |
-| NFR-Q5 review率30%以下 | `not_implemented` | 実E2E結果はあるが継続集計なし | G58、G42 |
+| NFR-Q5 review率30%以下 | `not_implemented` | Phase 2 reportでrun単位の集計は可能だが、private sampleはreview率100%で継続baselineもない | G42 |
 | NFR-S1 外部送信なし | `partially_implemented` | Ollama URL固定、`trust_env=False`、実行経路はlocalhostのみ | G37、G47 |
 | NFR-S2 Google Photos除外 | `requires_user_decision` | Pixel側の物理設定 | G37 |
 | NFR-S3 ログ衛生 | `partially_implemented` | inbox/failedは内容を出さず、CLI機能出力と分離 | G06の安全なtiming telemetryと運用時redirect方針 |
@@ -165,7 +165,7 @@ GitHub Issueは
 | G55 | P0 | 撮影年月とfallback規則のADR | なし | blocked: user decision |
 | G56 | P1 | 撮影年月によるarchive配置 | G55 | blocked: G55 |
 | G57 | P1 | legacy image_path棚卸しと非破壊移行方針 | なし | blocked: existing data audit |
-| G58 | P0 | Git管理外private評価ハーネス | なし | waiting: 今回実装 |
+| G58 | P0 | Git管理外private評価ハーネス | なし | implemented: PR待ち |
 | G59 | P1 | 再撮影版の重複private受入試験 | G58 | blocked: private capture |
 | G60 | P1 | 評価結果に基づくprompt・検証閾値調整判断 | G09、G42 | blocked: verified metrics |
 | G61 | P2 | Qwen3-VL 4B fallback比較と採否判断 | G42、G43 | blocked: verified metrics |

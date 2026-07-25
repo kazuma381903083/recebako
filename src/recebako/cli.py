@@ -23,6 +23,13 @@ from recebako.domain import (
     ReceiptFileState,
     ValidationResult,
 )
+from recebako.evaluation import (
+    DEFAULT_EVALUATION_MODELS,
+    EvaluationDatasetError,
+    EvaluationRunError,
+    GroundTruthError,
+    run_evaluation,
+)
 from recebako.imaging import ImagePreprocessError, preprocess_image
 from recebako.pipeline import process_receipt
 from recebako.runtime import (
@@ -65,6 +72,18 @@ def _positive_integer(value: str) -> int:
         raise argparse.ArgumentTypeError("1以上の整数を指定してください") from exc
     if parsed < 1:
         raise argparse.ArgumentTypeError("1以上の整数を指定してください")
+    return parsed
+
+
+def _iso_date(value: str) -> date:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "YYYY-MM-DD形式の実在日を指定してください"
+        ) from exc
+    if parsed.isoformat() != value:
+        raise argparse.ArgumentTypeError("YYYY-MM-DD形式の実在日を指定してください")
     return parsed
 
 
@@ -135,6 +154,53 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=_positive_integer,
         help="今回処理する最大件数です。",
+    )
+
+    evaluate_parser = subparsers.add_parser(
+        "evaluate",
+        help="Git管理外の匿名画像を安全に一括評価します。",
+    )
+    evaluate_subparsers = evaluate_parser.add_subparsers(
+        dest="evaluate_command",
+        required=True,
+    )
+    evaluate_run_parser = evaluate_subparsers.add_parser(
+        "run",
+        help="modelごとに分離した評価を実行します。",
+    )
+    evaluate_run_parser.add_argument(
+        "source_root",
+        type=Path,
+        help="case ID形式の匿名画像だけを置いたGit管理外directory",
+    )
+    evaluate_run_parser.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+        help="model別DBと安全なreportを保存するGit管理外directory",
+    )
+    evaluate_run_parser.add_argument(
+        "--ground-truth",
+        type=Path,
+        help="人間が確認した正解CSV（未指定ならaccuracyはunknown）",
+    )
+    evaluate_run_parser.add_argument(
+        "--model",
+        dest="models",
+        action="append",
+        choices=DEFAULT_EVALUATION_MODELS,
+        help="比較model。複数回指定できます。",
+    )
+    evaluate_run_parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in IngestMode],
+        default=IngestMode.REGULAR.value,
+        help="通常取込または過去取込を選択します。",
+    )
+    evaluate_run_parser.add_argument(
+        "--reference-date",
+        type=_iso_date,
+        help="再現可能な日付検証に使う基準日（YYYY-MM-DD）",
     )
     return parser
 
@@ -369,6 +435,35 @@ def _run_runtime_recover(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_evaluate(args: argparse.Namespace) -> int:
+    try:
+        config = load_config()
+        report = run_evaluation(
+            args.source_root,
+            output_root=args.output_root,
+            base_config=config,
+            mode=IngestMode(args.mode),
+            reference_date=args.reference_date or _local_date(),
+            ground_truth_path=args.ground_truth,
+            models=(
+                DEFAULT_EVALUATION_MODELS if args.models is None else tuple(args.models)
+            ),
+        )
+    except (
+        ConfigError,
+        EvaluationDatasetError,
+        EvaluationRunError,
+        GroundTruthError,
+    ):
+        print(
+            "recebako: error: 評価を安全に実行できませんでした",
+            file=sys.stderr,
+        )
+        return 1
+    print(report.model_dump_json(indent=2))
+    return 0
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "extract":
@@ -383,6 +478,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _run_runtime_recover(args)
     if args.command == "inbox" and args.inbox_command == "run":
         return _run_inbox(args)
+    if args.command == "evaluate" and args.evaluate_command == "run":
+        return _run_evaluate(args)
     raise AssertionError("到達不能なCLIコマンドです")
 
 

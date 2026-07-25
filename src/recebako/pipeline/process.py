@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 from datetime import date
+from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -17,6 +18,7 @@ from recebako.domain import (
     ValidationResult,
 )
 from recebako.imaging import preprocess_image
+from recebako.normalization import TaxNormalizationReason
 from recebako.storage import (
     MigrationError,
     ReceiptRepository,
@@ -26,7 +28,11 @@ from recebako.storage import (
     find_duplicate_candidate,
     initialize_database,
 )
-from recebako.validation import validate_receipt_payload
+from recebako.validation import (
+    DateNormalizationOutcome,
+    SchemaOutcome,
+    validate_receipt_payload_with_audit,
+)
 
 
 class ProcessResult(BaseModel):
@@ -41,6 +47,28 @@ class ProcessResult(BaseModel):
     date: str
     total: int
     phash: str
+
+
+class DuplicateOutcome(str, Enum):
+    NOT_EVALUATED = "not_evaluated"
+    NONE = "none"
+    IDENTITY = "identity"
+    PHASH = "phash"
+
+
+class ProcessAudit(BaseModel):
+    """Safe processing metadata that cannot contain private receipt values."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+    )
+
+    schema_outcome: SchemaOutcome
+    date_normalization_outcome: DateNormalizationOutcome
+    tax_normalization_reason: TaxNormalizationReason | None
+    duplicate_outcome: DuplicateOutcome
 
 
 def _with_duplicate_issue(validation: ValidationResult) -> ValidationResult:
@@ -65,6 +93,28 @@ def process_receipt(
     file_state: ReceiptFileState = ReceiptFileState.FINALIZED,
     temporary_root: Path | None = None,
 ) -> ProcessResult:
+    result, _ = process_receipt_with_audit(
+        image_path,
+        config=config,
+        mode=mode,
+        reference_date=reference_date,
+        storage_image_path=storage_image_path,
+        file_state=file_state,
+        temporary_root=temporary_root,
+    )
+    return result
+
+
+def process_receipt_with_audit(
+    image_path: Path,
+    *,
+    config: AppConfig,
+    mode: IngestMode,
+    reference_date: date,
+    storage_image_path: Path,
+    file_state: ReceiptFileState = ReceiptFileState.FINALIZED,
+    temporary_root: Path | None = None,
+) -> tuple[ProcessResult, ProcessAudit]:
     with preprocess_image(
         image_path,
         temporary_root=temporary_root,
@@ -75,7 +125,7 @@ def process_receipt(
             model=config.ollama.model,
             temperature=config.ollama.temperature,
         )
-        extraction, validation = validate_receipt_payload(
+        extraction, validation, validation_audit = validate_receipt_payload_with_audit(
             raw_payload,
             reference_date=reference_date,
             mode=mode,
@@ -119,14 +169,32 @@ def process_receipt(
     except sqlite3.Error as exc:
         raise StorageError("SQLiteへの保存に失敗しました") from exc
 
-    return ProcessResult(
-        receipt_id=receipt_id,
-        status=validation.status,
-        duplicate_of_id=duplicate.receipt_id if duplicate is not None else None,
-        validation_issues=validation.issues,
-        store=extraction.store if extraction is not None else "",
-        date_raw=extraction.date_raw if extraction is not None else "",
-        date=extraction.date if extraction is not None else "",
-        total=extraction.total if extraction is not None else 0,
-        phash=phash,
+    if extraction is None:
+        duplicate_outcome = DuplicateOutcome.NOT_EVALUATED
+    elif duplicate is None:
+        duplicate_outcome = DuplicateOutcome.NONE
+    else:
+        try:
+            duplicate_outcome = DuplicateOutcome(duplicate.match_type)
+        except ValueError:
+            duplicate_outcome = DuplicateOutcome.NOT_EVALUATED
+
+    return (
+        ProcessResult(
+            receipt_id=receipt_id,
+            status=validation.status,
+            duplicate_of_id=duplicate.receipt_id if duplicate is not None else None,
+            validation_issues=validation.issues,
+            store=extraction.store if extraction is not None else "",
+            date_raw=extraction.date_raw if extraction is not None else "",
+            date=extraction.date if extraction is not None else "",
+            total=extraction.total if extraction is not None else 0,
+            phash=phash,
+        ),
+        ProcessAudit(
+            schema_outcome=validation_audit.schema_outcome,
+            date_normalization_outcome=(validation_audit.date_normalization_outcome),
+            tax_normalization_reason=validation_audit.tax_normalization_reason,
+            duplicate_outcome=duplicate_outcome,
+        ),
     )

@@ -1,3 +1,15 @@
-from recebako.pipeline.process import ProcessResult, process_receipt
+from recebako.pipeline.process import (
+    DuplicateOutcome,
+    ProcessAudit,
+    ProcessResult,
+    process_receipt,
+    process_receipt_with_audit,
+)
 
-__all__ = ["ProcessResult", "process_receipt"]
+__all__ = [
+    "DuplicateOutcome",
+    "ProcessAudit",
+    "ProcessResult",
+    "process_receipt",
+    "process_receipt_with_audit",
+]

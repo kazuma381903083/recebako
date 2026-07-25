@@ -87,6 +87,8 @@ bug fixでは修正前に失敗し修正後に成功するregression testを追�
 
 Ollama応答はCIではmockする。ローカルモデル試験は`ollama` marker、実レシート試験は
 `private` markerを使用し、いずれも通常のCIから分離する。
+Git管理外の匿名caseを一括評価する手順と正解CSV契約は
+[`PRIVATE_EVALUATION.md`](PRIVATE_EVALUATION.md)に従う。
 
 ## 7. 自己レビュー
 
