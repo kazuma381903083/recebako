@@ -1,7 +1,7 @@
 # Recebako Autopilot Status
 
 更新日: 2026-07-26
-作業ブランチ: `autopilot/recebako-v1`
+作業ブランチ: `issue/42-quality-baseline`
 
 ## Phase 1C
 
@@ -21,7 +21,8 @@
 - 自走開発基盤、v1.1ギャップ分析、Issue linkは独立commitでpush済み
 - G01〜G62をGitHub Issue `#1`〜`#62`として作成済み
 - 各Issueへ優先度、依存関係、受入条件、private E2E要否、security境界、waiting／blocked理由を記録済み
-- main向けPull Request [#63](https://github.com/kazuma381903083/recebako/pull/63)を作成済み。自動mergeせず、mainは未変更
+- Pull Request [#63](https://github.com/kazuma381903083/recebako/pull/63)はmainへmerge済み
+- Issue #42の起点mainはPR #63のmerge commit `8d6f9ee`
 
 ## Phase 2 private evaluation
 
@@ -39,7 +40,38 @@
 - 境界確認: 匿名source copyと通常data領域は不変、model別DBは分離、report禁止項目なし、runtime権限検査成功
 - 残余リスク: 同一OS accountで同時実行される敵対processは既にprivate runtimeと同等権限を持つため、評価の隔離境界外。信頼済みlocal sessionで実行する
 
+## Phase 2 quality baseline
+
+- 状態: `quality-v1`定義、aggregate-only sidecar実装、22/30 verifiedのbaseline
+  測定と文書化を実施。Issue #42の30/30 private受入は未完了
+- 対象Issue: `#42`
+- 評価条件: historical mode、reference date固定、temperature 0、同一入力順、
+  model別DB
+- 使用件数: 30件
+- human verified: 22件。残る8件はaccuracy分母へ含めていない
+- model: `qwen3-vl:8b`、`qwen3.5:9b`
+- 互換性: stdoutと`evaluation-report.json`のschema version 1を維持し、
+  実装後のrunでは`quality-baseline-report.json` schema version 1を独立生成
+- 指標: 店名だけをNFKC・case folding・Unicode空白除去で比較し、品目は
+  raw名・数量・税込line priceの完全一致tupleを順序保持LCSで評価
+- target 30件に対してverified 22件のため、観測rateは記録するがQ1〜Q5の
+  assessmentは全modelで`unknown`
+- `qwen3-vl:8b`: processing/schema 100.0%、confirmed/review/failed
+  33.3%/66.7%/0.0%、平均38.1秒/件
+- `qwen3.5:9b`: processing/schema 93.3%/93.3%、confirmed/review/failed
+  10.0%/83.3%/6.7%、平均46.3秒/件
+- 品質観測値と計算方法: `docs/BASELINE_REPORT.md`
+- confirmed率をaccuracyとして扱わず、model既定値、prompt、検証閾値は変更して
+  いない
+- private境界: 評価source不変、model別DB分離、通常利用DB非変更、Git記録は
+  aggregate値だけ
+- 22/30 private E2Eでsidecar型、legacy集計一致、provenance、0600権限、
+  private allowlist境界を確認済み
+
 ## Remaining
 
-1. Pull Request #63のreviewと、ユーザー判断によるmainへのmergeを待つ
-2. Phase 3以降はIssueの依存関係・優先順位に従うwaiting／blocked状態を維持し、今回実装しない
+1. 残る8件のground truthを人間が確認し、30/30 verifiedでQ1〜Q5を再判定して
+   Issue #42のprivate受入を完了する
+2. 品質改善は完全なbaseline取得後にIssue #60の範囲で判断し、Issue #42では
+   model既定値を変更しない
+3. Phase 3以降はIssueの依存関係・優先順位に従うwaiting／blocked状態を維持する

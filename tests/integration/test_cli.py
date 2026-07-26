@@ -1016,8 +1016,9 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
     data_root = tmp_path / "normal-data"
     config_path = _write_config(tmp_path, data_root)
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
-    private_store = "synthetic-ground-truth-store"
-    private_item = "synthetic-ground-truth-item"
+    private_sentinel = "synthetic-private-sidecar-sentinel"
+    private_store = f"{private_sentinel}-store"
+    private_item = f"{private_sentinel}-item"
     private_total = 864_209
 
     def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
@@ -1048,6 +1049,7 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
         f"0,{private_item},2,{private_total}\n",
         encoding="utf-8",
     )
+    output_root = tmp_path / "evaluation-output"
 
     exit_code = cli.run(
         [
@@ -1055,7 +1057,7 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
             "run",
             str(source_root),
             "--output-root",
-            str(tmp_path / "evaluation-output"),
+            str(output_root),
             "--ground-truth",
             str(ground_truth_path),
             "--model",
@@ -1067,9 +1069,14 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
 
     captured = capsys.readouterr()
     report = json.loads(captured.out)
-    accuracy = report["models"][0]["accuracy"]
     assert exit_code == 0
     assert captured.err == ""
+    assert report["schema_version"] == 1
+    assert set(report) == {"schema_version", "run_id", "models"}
+    assert len(report["models"]) == 1
+    model_report = report["models"][0]
+    assert set(model_report) == {"model_name", "cases", "summary", "accuracy"}
+    accuracy = model_report["accuracy"]
     assert accuracy["status"] == "measured"
     assert accuracy["reason"] is None
     assert accuracy["verified_case_count"] == 1
@@ -1087,11 +1094,102 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
             "correct_count": 1,
             "accuracy_rate": 1.0,
         }
+
+    run_root = output_root / report["run_id"]
+    persisted_report_text = (run_root / "evaluation-report.json").read_text(
+        encoding="utf-8"
+    )
+    persisted_report = json.loads(persisted_report_text)
+    assert persisted_report == report
+    assert persisted_report["schema_version"] == 1
+    assert set(persisted_report["models"][0]) == {
+        "model_name",
+        "cases",
+        "summary",
+        "accuracy",
+    }
+
+    sidecar_text = (run_root / "quality-baseline-report.json").read_text(
+        encoding="utf-8"
+    )
+    sidecar = json.loads(sidecar_text)
+    assert sidecar["schema_version"] == 1
+    assert sidecar["run_id"] == report["run_id"]
+    assert set(sidecar) == {"schema_version", "run_id", "models"}
+    assert len(sidecar["models"]) == 1
+    sidecar_model = sidecar["models"][0]
+    assert set(sidecar_model) == {
+        "provenance",
+        "summary",
+        "accuracy",
+        "quality",
+    }
+    assert sidecar_model["summary"] == model_report["summary"]
+    assert sidecar_model["accuracy"] == accuracy
+    provenance = sidecar_model["provenance"]
+    assert provenance["metric_version"] == "quality-v1"
+    assert provenance["model_name"] == "qwen3-vl:8b"
+    assert len(provenance["prompt_sha256"]) == 64
+    assert len(provenance["extraction_schema_sha256"]) == 64
+
+    quality = sidecar_model["quality"]
+    assert quality["metric_version"] == "quality-v1"
+    assert quality["target_case_count"] == 1
+    assert quality["verified_case_count"] == 1
+    assert quality["golden_set_complete"] is False
+    assert quality["total_accuracy"] == {
+        "denominator_count": 1,
+        "numerator_count": 1,
+        "rate": 1.0,
+    }
+    assert quality["store_accuracy"] == {
+        "denominator_count": 1,
+        "numerator_count": 1,
+        "rate": 1.0,
+    }
+    assert quality["date_accuracy"] == {
+        "denominator_count": 1,
+        "numerator_count": 1,
+        "rate": 1.0,
+    }
+    assert quality["item_accuracy"] == {
+        "denominator_count": 1,
+        "numerator_count": 1,
+        "rate": 1.0,
+    }
+    assert quality["false_confirmation_rate"] == {
+        "denominator_count": 1,
+        "numerator_count": 0,
+        "rate": 0.0,
+    }
+    assert quality["review_rate"] == {
+        "denominator_count": 1,
+        "numerator_count": 0,
+        "rate": 0.0,
+    }
+    for field_name in (
+        "q1_total",
+        "q2_store_and_date",
+        "q3_items",
+        "q4_false_confirmation",
+        "q5_review",
+    ):
+        assert quality[field_name] == {
+            "status": "unknown",
+            "reason": "incomplete_golden_set",
+        }
+
     for forbidden in (
+        private_sentinel,
         private_store,
         private_item,
         str(private_total),
         str(ground_truth_path),
         str(source_root),
+        str(output_root),
+        str(data_root),
     ):
         assert forbidden not in captured.out
+        assert forbidden not in persisted_report_text
+        assert forbidden not in sidecar_text
+    assert "case-0001" not in sidecar_text

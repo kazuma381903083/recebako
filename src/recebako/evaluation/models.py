@@ -36,6 +36,10 @@ SafeCode = Annotated[
         max_length=128,
     ),
 ]
+Sha256Digest = Annotated[
+    str,
+    StringConstraints(pattern=r"^[0-9a-f]{64}$", min_length=64, max_length=64),
+]
 
 
 class SchemaOutcome(str, Enum):
@@ -86,6 +90,17 @@ class AccuracyStatus(str, Enum):
 
 class AccuracyUnknownReason(str, Enum):
     NO_HUMAN_VERIFIED_GROUND_TRUTH = "no_human_verified_ground_truth"
+
+
+class QualityAssessmentStatus(str, Enum):
+    UNKNOWN = "unknown"
+    MET = "met"
+    NOT_MET = "not_met"
+
+
+class QualityUnknownReason(str, Enum):
+    INCOMPLETE_GOLDEN_SET = "incomplete_golden_set"
+    ZERO_DENOMINATOR = "zero_denominator"
 
 
 class _ReportModel(BaseModel):
@@ -157,6 +172,232 @@ class AccuracyMetric(_ReportModel):
         if abs(self.accuracy_rate - expected_rate) > 1e-12:
             raise ValueError("accuracy rate is inconsistent with its counts")
         return self
+
+
+class QualityRateMetric(_ReportModel):
+    denominator_count: int = Field(ge=0)
+    numerator_count: int = Field(ge=0)
+    rate: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _validate_counts_and_rate(self) -> QualityRateMetric:
+        if self.numerator_count > self.denominator_count:
+            raise ValueError("numerator_count cannot exceed denominator_count")
+        if self.denominator_count == 0:
+            if self.numerator_count != 0 or self.rate is not None:
+                raise ValueError("zero-denominator metrics cannot have a rate")
+            return self
+        if self.rate is None:
+            raise ValueError("non-empty quality metrics require a rate")
+        expected_rate = self.numerator_count / self.denominator_count
+        if abs(self.rate - expected_rate) > 1e-12:
+            raise ValueError("quality rate is inconsistent with its counts")
+        return self
+
+
+class QualityAssessment(_ReportModel):
+    status: QualityAssessmentStatus
+    reason: QualityUnknownReason | None = None
+
+    @model_validator(mode="after")
+    def _validate_status_and_reason(self) -> QualityAssessment:
+        if self.status is QualityAssessmentStatus.UNKNOWN:
+            if self.reason is None:
+                raise ValueError("unknown quality assessment requires a reason")
+        elif self.reason is not None:
+            raise ValueError("measured quality assessment cannot have a reason")
+        return self
+
+
+class QualityThresholds(_ReportModel):
+    q1_total_minimum: float = Field(default=0.98, ge=0, le=1)
+    q2_store_minimum: float = Field(default=0.95, ge=0, le=1)
+    q2_date_minimum: float = Field(default=0.95, ge=0, le=1)
+    q3_items_minimum: float = Field(default=0.80, ge=0, le=1)
+    q4_false_confirmation_maximum: float = Field(default=0.02, ge=0, le=1)
+    q5_review_maximum: float = Field(default=0.30, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _validate_fixed_quality_v1_thresholds(self) -> QualityThresholds:
+        if self.model_dump() != {
+            "q1_total_minimum": 0.98,
+            "q2_store_minimum": 0.95,
+            "q2_date_minimum": 0.95,
+            "q3_items_minimum": 0.80,
+            "q4_false_confirmation_maximum": 0.02,
+            "q5_review_maximum": 0.30,
+        }:
+            raise ValueError("quality-v1 thresholds are fixed")
+        return self
+
+
+class QualityBaselineSummary(_ReportModel):
+    metric_version: Literal["quality-v1"] = "quality-v1"
+    required_verified_case_count: Literal[30] = 30
+    target_case_count: int = Field(ge=0)
+    verified_case_count: int = Field(ge=0)
+    golden_set_complete: bool
+    total_accuracy: QualityRateMetric
+    store_accuracy: QualityRateMetric
+    date_accuracy: QualityRateMetric
+    item_accuracy: QualityRateMetric
+    false_confirmation_rate: QualityRateMetric
+    review_rate: QualityRateMetric
+    thresholds: QualityThresholds = Field(default_factory=QualityThresholds)
+    q1_total: QualityAssessment
+    q2_store_and_date: QualityAssessment
+    q3_items: QualityAssessment
+    q4_false_confirmation: QualityAssessment
+    q5_review: QualityAssessment
+
+    @model_validator(mode="after")
+    def _validate_quality_baseline(self) -> QualityBaselineSummary:
+        if self.verified_case_count > self.target_case_count:
+            raise ValueError("verified cases cannot exceed target cases")
+        expected_complete = (
+            self.target_case_count == self.required_verified_case_count
+            and self.verified_case_count == self.required_verified_case_count
+        )
+        if self.golden_set_complete is not expected_complete:
+            raise ValueError("golden_set_complete is inconsistent with case counts")
+        case_metrics = (
+            self.total_accuracy,
+            self.store_accuracy,
+            self.date_accuracy,
+        )
+        if any(
+            metric.denominator_count != self.verified_case_count
+            for metric in case_metrics
+        ):
+            raise ValueError("case accuracy denominators must equal verified cases")
+        if self.false_confirmation_rate.denominator_count > self.verified_case_count:
+            raise ValueError("confirmed denominator cannot exceed verified cases")
+        confirmed_count = self.false_confirmation_rate.denominator_count
+        false_confirmed_count = self.false_confirmation_rate.numerator_count
+        total_correct_count = self.total_accuracy.numerator_count
+        minimum_false_confirmed = max(0, confirmed_count - total_correct_count)
+        maximum_false_confirmed = min(
+            confirmed_count,
+            self.verified_case_count - total_correct_count,
+        )
+        if not (
+            minimum_false_confirmed <= false_confirmed_count <= maximum_false_confirmed
+        ):
+            raise ValueError(
+                "false confirmations are inconsistent with confirmed and total counts"
+            )
+        if self.review_rate.denominator_count != self.target_case_count:
+            raise ValueError("review denominator must equal target cases")
+        assessments = (
+            self.q1_total,
+            self.q2_store_and_date,
+            self.q3_items,
+            self.q4_false_confirmation,
+            self.q5_review,
+        )
+        if not self.golden_set_complete:
+            if any(
+                assessment.status is not QualityAssessmentStatus.UNKNOWN
+                or assessment.reason is not QualityUnknownReason.INCOMPLETE_GOLDEN_SET
+                for assessment in assessments
+            ):
+                raise ValueError(
+                    "incomplete golden sets require unknown quality assessments"
+                )
+            return self
+
+        expected_assessments = (
+            _minimum_assessment(
+                self.total_accuracy,
+                self.thresholds.q1_total_minimum,
+            ),
+            _combined_minimum_assessment(
+                (self.store_accuracy, self.date_accuracy),
+                (
+                    self.thresholds.q2_store_minimum,
+                    self.thresholds.q2_date_minimum,
+                ),
+            ),
+            _minimum_assessment(
+                self.item_accuracy,
+                self.thresholds.q3_items_minimum,
+            ),
+            _maximum_assessment(
+                self.false_confirmation_rate,
+                self.thresholds.q4_false_confirmation_maximum,
+            ),
+            _maximum_assessment(
+                self.review_rate,
+                self.thresholds.q5_review_maximum,
+            ),
+        )
+        if any(
+            actual != expected
+            for actual, expected in zip(
+                assessments,
+                expected_assessments,
+                strict=True,
+            )
+        ):
+            raise ValueError("quality assessments are inconsistent with quality-v1")
+        return self
+
+
+def _minimum_assessment(
+    metric: QualityRateMetric,
+    threshold: float,
+) -> QualityAssessment:
+    if metric.rate is None:
+        return QualityAssessment(
+            status=QualityAssessmentStatus.UNKNOWN,
+            reason=QualityUnknownReason.ZERO_DENOMINATOR,
+        )
+    return QualityAssessment(
+        status=(
+            QualityAssessmentStatus.MET
+            if metric.rate >= threshold
+            else QualityAssessmentStatus.NOT_MET
+        )
+    )
+
+
+def _maximum_assessment(
+    metric: QualityRateMetric,
+    threshold: float,
+) -> QualityAssessment:
+    if metric.rate is None:
+        return QualityAssessment(
+            status=QualityAssessmentStatus.UNKNOWN,
+            reason=QualityUnknownReason.ZERO_DENOMINATOR,
+        )
+    return QualityAssessment(
+        status=(
+            QualityAssessmentStatus.MET
+            if metric.rate <= threshold
+            else QualityAssessmentStatus.NOT_MET
+        )
+    )
+
+
+def _combined_minimum_assessment(
+    metrics: tuple[QualityRateMetric, ...],
+    thresholds: tuple[float, ...],
+) -> QualityAssessment:
+    if any(metric.rate is None for metric in metrics):
+        return QualityAssessment(
+            status=QualityAssessmentStatus.UNKNOWN,
+            reason=QualityUnknownReason.ZERO_DENOMINATOR,
+        )
+    return QualityAssessment(
+        status=(
+            QualityAssessmentStatus.MET
+            if all(
+                metric.rate is not None and metric.rate >= threshold
+                for metric, threshold in zip(metrics, thresholds, strict=True)
+            )
+            else QualityAssessmentStatus.NOT_MET
+        )
+    )
 
 
 def _empty_accuracy_metric() -> AccuracyMetric:
@@ -335,4 +576,72 @@ class EvaluationReport(_ReportModel):
     def _validate_model_names(self) -> EvaluationReport:
         if len({report.model_name for report in self.models}) != len(self.models):
             raise ValueError("report model names must be unique")
+        return self
+
+
+class QualityProvenance(_ReportModel):
+    metric_version: Literal["quality-v1"] = "quality-v1"
+    model_name: ModelName
+    prompt_sha256: Sha256Digest
+    extraction_schema_sha256: Sha256Digest
+
+
+class QualityModelReport(_ReportModel):
+    provenance: QualityProvenance
+    summary: ModelEvaluationSummary
+    accuracy: AccuracySummary
+    quality: QualityBaselineSummary
+
+    @model_validator(mode="after")
+    def _validate_aggregate_consistency(self) -> QualityModelReport:
+        if self.quality.target_case_count != self.summary.case_count:
+            raise ValueError("quality target count must match summary case count")
+        if self.quality.verified_case_count != self.accuracy.verified_case_count:
+            raise ValueError("quality and accuracy verified counts must match")
+
+        exact_quality_metrics = (
+            (self.quality.total_accuracy, self.accuracy.total),
+            (self.quality.date_accuracy, self.accuracy.date),
+        )
+        if any(
+            quality_metric.denominator_count != accuracy_metric.comparable_count
+            or quality_metric.numerator_count != accuracy_metric.correct_count
+            for quality_metric, accuracy_metric in exact_quality_metrics
+        ):
+            raise ValueError("quality exact metrics must match existing accuracy")
+        if (
+            self.quality.store_accuracy.denominator_count
+            != self.accuracy.store.comparable_count
+            or self.quality.store_accuracy.numerator_count
+            < self.accuracy.store.correct_count
+        ):
+            raise ValueError("normalized store accuracy is inconsistent")
+
+        expected_review_count = self.summary.status_counts.get(
+            EvaluationStatus.REVIEW,
+            0,
+        )
+        if (
+            self.quality.review_rate.denominator_count != self.summary.case_count
+            or self.quality.review_rate.numerator_count != expected_review_count
+        ):
+            raise ValueError("quality review rate must match summary")
+        if (
+            self.quality.false_confirmation_rate.denominator_count
+            > self.summary.status_counts.get(EvaluationStatus.CONFIRMED, 0)
+        ):
+            raise ValueError("verified confirmations cannot exceed all confirmations")
+        return self
+
+
+class QualityBaselineReport(_ReportModel):
+    schema_version: Literal[1] = 1
+    run_id: RunId
+    models: tuple[QualityModelReport, ...]
+
+    @model_validator(mode="after")
+    def _validate_model_names(self) -> QualityBaselineReport:
+        model_names = tuple(report.provenance.model_name for report in self.models)
+        if len(set(model_names)) != len(model_names):
+            raise ValueError("quality report model names must be unique")
         return self

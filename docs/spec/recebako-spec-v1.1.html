@@ -415,6 +415,12 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
     <tr><td class="c mono">NFR-Q4</td><td>誤確定率</td><td>「confirmed判定なのに合計が誤り」が<strong>2%以下</strong></td><td>検証すり抜けの監視指標</td></tr>
     <tr><td class="c mono">NFR-Q5</td><td>要確認率</td><td>30%以下（運用が回る上限）</td><td>高すぎたらプロンプト/モデル見直し</td></tr>
   </table></div>
+  <p class="note">※ NFR-Q1〜Q5の再現可能な分母、店名の比較正規化、
+    raw品目tupleの順序保持alignment、0分母、30件未満の扱いは
+    <a href="../adr/002-quality-baseline-metrics.md">ADR 002</a>の
+    <code>quality-v1</code>で固定する。既存評価reportとstdoutのschema version 1は
+    変更せず、品質判定はaggregate-onlyの独立sidecarへ記録する。30件すべてが
+    人間確認済みになるまでは観測rateを目標達成判定として扱わない。</p>
   <h3><span class="hn">7-3</span>セキュリティ要件</h3>
   <div class="tbl-scroll"><table>
     <tr><th style="width:80px" class="c">ID</th><th>項目</th><th>要件</th></tr>
