@@ -30,8 +30,9 @@ from recebako.evaluation import (
     GroundTruthError,
     run_evaluation,
 )
-from recebako.imaging import ImagePreprocessError, preprocess_image
+from recebako.imaging import ImagePreprocessError, preprocess_image_variants
 from recebako.pipeline import process_receipt
+from recebako.pipeline.retry import extract_with_variant_retry
 from recebako.runtime import (
     InboxLockError,
     RuntimeFileError,
@@ -52,7 +53,6 @@ from recebako.storage import (
     image_path_relative_to_root,
     initialize_database,
 )
-from recebako.validation import validate_receipt_payload
 
 
 def _add_image_and_mode_arguments(parser: argparse.ArgumentParser) -> None:
@@ -257,17 +257,17 @@ def _run_extract(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        with preprocess_image(image_path) as preprocessed:
-            raw_extraction = request_receipt_extraction(preprocessed.path)
-            extraction, validation = validate_receipt_payload(
-                raw_extraction,
+        with preprocess_image_variants(image_path) as variants:
+            extraction_result = extract_with_variant_retry(
+                variants,
+                request=request_receipt_extraction,
                 reference_date=_local_date(),
                 mode=IngestMode(args.mode),
             )
             output = _output_payload(
-                extraction,
-                validation,
-                phash=preprocessed.phash,
+                extraction_result.extraction,
+                extraction_result.validation,
+                phash=extraction_result.phash,
             )
     except (ImagePreprocessError, OSError, OllamaError) as exc:
         print(f"recebako: error: {exc}", file=sys.stderr)

@@ -175,9 +175,18 @@ def test_run_inbox_transition_failure_is_pending_until_next_run_recovers(
     data_root = tmp_path / "data"
     paths, _ = initialize_runtime(data_root)
     _write_image(paths.inbox / "receipt.jpg")
+    call_count = 0
+
+    def invalid_then_valid(path: Path, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return "{not-json"
+        return _payload()
+
     monkeypatch.setattr(
         "recebako.pipeline.process.request_receipt_extraction",
-        lambda path, **kwargs: _payload(),
+        invalid_then_valid,
     )
     original_move_to_final = inbox_module.move_to_final
 
@@ -200,8 +209,13 @@ def test_run_inbox_transition_failure_is_pending_until_next_run_recovers(
     assert pending.file_state is ReceiptFileState.PENDING
     assert pending.image_path.startswith("processing/")
     assert (data_root / pending.image_path).is_file()
+    assert call_count == 2
 
     monkeypatch.setattr(inbox_module, "move_to_final", original_move_to_final)
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: pytest.fail("pending record must not be re-extracted"),
+    )
     recovered_run = run_inbox(
         config=_config(data_root),
         mode=IngestMode.REGULAR,
@@ -216,6 +230,7 @@ def test_run_inbox_transition_failure_is_pending_until_next_run_recovers(
     assert finalized.image_path == "archive/2026/07/1_receipt.jpg"
     assert (data_root / finalized.image_path).is_file()
     assert list(paths.processing.iterdir()) == []
+    assert call_count == 2
 
 
 def test_run_inbox_non_receipt_transition_recovers_without_second_registration(
@@ -494,7 +509,7 @@ def test_run_inbox_failure_writes_safe_metadata_and_continues(
     def fake_request(path: Path, **kwargs: Any) -> str:
         nonlocal call_count
         call_count += 1
-        if call_count == 1:
+        if call_count <= 3:
             raise OllamaTimeoutError("private raw response 9999円")
         return _payload()
 
@@ -524,6 +539,7 @@ def test_run_inbox_failure_writes_safe_metadata_and_continues(
     with sqlite3.connect(data_root / "ledger.db") as connection:
         count = connection.execute("SELECT COUNT(*) FROM receipts").fetchone()
     assert count == (1,)
+    assert call_count == 4
 
 
 def test_run_inbox_historical_mode_uses_old_receipt_archive_date(
