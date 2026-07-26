@@ -31,7 +31,7 @@ human-verifiedな正解がない場合は達成済みとしない。
 | FR-01 画像自動検知、起動時一括処理 | `partially_implemented` | `recebako inbox run`、排他、順序、limit、自動回復を実装 | watcher、launchd |
 | FR-02 EXIF回転、長辺2048px、pHash | `implemented` | `imaging/preprocess.py` と `test_preprocess.py` | private撮影条件での受入確認のみ |
 | FR-03 定義済みJSONによる抽出 | `implemented` | Pydantic schemaをOllama `format` に指定、temperature=0、必須strict booleanの `is_receipt` を検証 | `name_norm` は別要求 |
-| FR-04 合計、日付、重複、三値判定 | `partially_implemented` | 検証、pHash/identity重複、confirmed/review/failedを実装 | 最大3回の画像variant再試行 |
+| FR-04 合計、日付、重複、三値判定 | `implemented` | 検証、pHash/identity重複、confirmed/review/failed、最大3試行の決定的な画像variant再試行を実装 | private劣化条件の受入はG45 |
 | FR-05 費目分類と店名マスタ学習 | `not_implemented` | DB列と `store_master` テーブルのみ存在し保存値は未設定 | G01、G19、G23〜G25 |
 | FR-06 SQLite保存、原画像相対パス、撮影年月archive | `partially_implemented` | transaction、`file_state`、排他的移動、回復、実在相対パスをテスト。現在の年月は抽出日（不正時は実行日）で決まり撮影年月ではない | G55〜G57 |
 | FR-07 自己完結月次HTML | `not_implemented` | `reports/` と外観サンプルのみ | G27〜G33、G50、G51 |
@@ -46,10 +46,10 @@ human-verifiedな正解がない場合は達成済みとしない。
 | §5-1 JSON Schema強制、必須値検証 | `implemented` | `domain/receipt.py`、`ai/ollama.py`、Ollama mock tests | なし |
 | §5-1、ADR-001 税情報、raw/normalized価格、安全な補正 | `implemented` | migration 002、`normalization/tax.py`、監査issue code | なし |
 | §5-2 receipts/items/store_master | `partially_implemented` | テーブルは存在 | category、name_norm、master挙動 |
-| §5-3 inbox→processing→archive/review/failed | `partially_implemented` | 排他的移動、pending/finalized、起動時回復、dry-run、非レシートの即時failed隔離 | 抽出3回失敗後という規則（G04） |
+| §5-3 inbox→processing→archive/review/failed | `implemented` | 排他的移動、pending/finalized、起動時回復、dry-run、非レシートの即時failed隔離、最大3試行失敗後のfailed遷移 | なし |
 | §6-1 推測禁止、負値、schema、temperature=0 | `implemented` | `ai/ollama.py` | なし |
 | §6-2 合計・日付・confidence・重複のreview判定 | `implemented` | `validation/receipt.py`、`storage/duplicates.py` | なし |
-| §6-2 回転・拡大を伴う最大3回再試行 | `not_implemented` | Ollama呼出しは1回 | G04 |
+| §6-2 回転・拡大を伴う最大3回再試行 | `implemented` | standard、時計回り90度、2倍拡大の順序、再試行・即時停止規則、一時variant cleanupを自動test | private劣化条件の受入はG45 |
 | §6-3 店名マスタ優先、未知店だけLLM、修正学習 | `not_implemented` | 実装なし | G01、G19、G23〜G25 |
 | §6-4 raw品目名と `name_norm` の分離 | `not_implemented` | DB列のみ、domain/promptに未追加 | G07 |
 | §6-4 confirmed限定のレポート集計 | `not_implemented` | query layerなし | G27 |
@@ -111,7 +111,7 @@ GitHub Issueは
 | G01 | P0 | 費目粒度とstore照合規則のADR | なし | blocked: user decision |
 | G02 | P0 | 重複除外の永続状態と集計規則のADR | なし | blocked: user decision |
 | G03 | P0 | 非レシート構造化判定 | なし | implemented: schema/validation/failed recoveryを自動test |
-| G04 | P0 | 最大3回の抽出variant再試行 | G03推奨（hard dependencyではない） | waiting |
+| G04 | P0 | 最大3回の抽出variant再試行 | G03推奨（hard dependencyではない） | implemented: 決定的な順序・停止条件・cleanupを自動test |
 | G05 | P1 | 全抽出CLIのmodel/endpoint設定統一 | なし | waiting |
 | G06 | P1 | 機微情報を含まない段階別処理時間計測 | G49 | blocked: G49 |
 | G07 | P1 | raw品目名とname_normの分離 | なし | waiting |
@@ -173,12 +173,14 @@ GitHub Issueは
 
 ## 7. 今回の実装境界
 
-Issue #3ではOllama抽出schemaへ必須のstrict boolean `is_receipt`を追加し、
-`false`を正規化・日付・税・重複判定より前に即failedへ隔離する。schema-validな
-非レシートは既存のtransaction、pending/finalized、failed directory、起動時回復を
-利用し、通信失敗などのoperational errorとは区別する。
+Issue #4では、初回を含む最大3試行をstandard、時計回り90度、2倍拡大の順で行う。
+不正JSON、schema-invalid、Ollama timeoutだけを次のvariantへ進め、schema-validな
+非レシートとreviewは停止する。接続、HTTP、応答包絡、画像、DB、ファイルの例外は
+即時停止する。全試行は同じlocalhost endpoint、model、temperatureを使い、採用した
+payloadだけを税正規化、重複判定、DB保存へ一度渡す。一時variantは処理後に削除し、
+元画像、既存のpHash、transaction、pending/finalized回復契約を変更しない。
 
-画像variantによる最大3回再試行、非レシート理由の自由文生成、DB migration、
-外部AI、モデル既定値、confidence閾値は変更しない。private画像を使うdegraded/
-nonreceipt受入はIssue #45の範囲とし、Issue #3のCIは合成画像とmock Ollama応答だけを
-使用する。
+外部AI、model切替、DB migration、試行履歴の永続化、private画像によるdegraded/
+nonreceipt受入は追加しない。timeoutが3試行続く最悪時間の性能評価はNFR-P1の測定境界
+を定めるG49と、計測・benchmarkを行うG06/G43の範囲に残す。Issue #4のCIは合成画像と
+mock Ollama応答だけを使用する。

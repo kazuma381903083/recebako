@@ -1,7 +1,7 @@
 # Recebako Autopilot Status
 
 更新日: 2026-07-26
-作業ブランチ: `issue/3-non-receipt-detection`
+作業ブランチ: `issue/4-extraction-variant-retry`
 
 ## Phase 1C
 
@@ -24,7 +24,9 @@
 - Pull Request [#63](https://github.com/kazuma381903083/recebako/pull/63)はmainへmerge済み
 - Pull Request [#64](https://github.com/kazuma381903083/recebako/pull/64)はmainへmerge済み
 - Issue #42はユーザーが22/30 verifiedの現行baselineを受け入れたためclose済み
-- Issue #3の起点mainはPR #64のmerge commit `a59ebb5`
+- Pull Request #65はIssue #42の受入記録、Pull Request #66はIssue #3の実装として
+  main向けに作成済み。Issue #4は両変更の後続として独立commitにする
+- Issue #3とIssue #4の起点mainはPR #64のmerge commit `a59ebb5`
 
 ## Phase 2 private evaluation
 
@@ -89,8 +91,32 @@
 - DB migration、新規依存、外部AI、モデル既定値、confidence閾値の変更なし
 - 自動検査: private-file scan、ruff、format、mypy、358 tests、diff checks成功
 
+## Phase 2 extraction variant retry
+
+- 状態: Issue #4の実装、仕様更新、回帰test、全検査を作業ブランチで完了
+- 対象Issue: `#4`
+- 試行順: standard、時計回り90度、standardの2倍拡大（長辺2048px上限）。
+  最大3回は初回を含む総試行数
+- 再試行: 不正JSON、schema-invalid、Ollama timeoutだけを次variantへ進める。
+  schema-validな非レシートとreviewは即停止し、接続、HTTP/API応答、画像、DB、
+  ファイル例外は再試行しない
+- 設定: 全試行で同じlocalhost endpoint、model、temperatureを使用し、model切替や
+  動的推測を行わない
+- 後段処理: 採用payloadだけを税正規化、重複判定、DB transactionへ一度渡す。
+  3回schema-invalidの場合は最終payloadだけをfailed 1行として保存する
+- 画像: 元画像を変更せず、既存互換pHashを全variantで共有。runtime処理では`tmp`
+  配下、単体extractではprocess所有のOS一時領域に遅延生成し、成功、失敗、例外の
+  すべてで削除する
+- 回復: 途中成功後のDB rollback、最終ファイル移動失敗、次回起動時の再抽出なし
+  1行回復を自動testで確認
+- private境界: private画像を使用せず、合成画像とmock応答だけで検証。破棄した応答、
+  variant path、試行履歴をresult、audit、stdout、DBへ追加しない
+- DB migration、新規依存、外部AI、モデル既定値、timeout、confidence閾値の変更なし
+- 自動検査: private-file scan、ruff、format、mypy、388 tests、diff checks成功
+
 ## Remaining
 
-1. Issue #3を独立commitとしてpushし、main向けPull Requestを作成する
-2. 次の依存なしP0、またはIssue #3を前提にするIssue #4へ進む
-3. 22/30 baselineは現状の評価として維持し、confirmed率をaccuracyと表現しない
+1. Issue #4を独立commitとしてpushし、main向けPull Requestを作成する
+2. Pull Request #65、#66、Issue #4の依存順を保ち、自動mergeせずreviewを待つ
+3. 次の未実装Issueへ進む。22/30 baselineは現状の評価として維持し、confirmed率を
+   accuracyと表現しない

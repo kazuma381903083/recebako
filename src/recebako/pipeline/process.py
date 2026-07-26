@@ -17,8 +17,9 @@ from recebako.domain import (
     ValidationIssue,
     ValidationResult,
 )
-from recebako.imaging import preprocess_image
+from recebako.imaging import preprocess_image_variants
 from recebako.normalization import TaxNormalizationReason
+from recebako.pipeline.retry import extract_with_variant_retry
 from recebako.storage import (
     MigrationError,
     ReceiptRepository,
@@ -31,7 +32,6 @@ from recebako.storage import (
 from recebako.validation import (
     DateNormalizationOutcome,
     SchemaOutcome,
-    validate_receipt_payload_with_audit,
 )
 
 
@@ -115,22 +115,26 @@ def process_receipt_with_audit(
     file_state: ReceiptFileState = ReceiptFileState.FINALIZED,
     temporary_root: Path | None = None,
 ) -> tuple[ProcessResult, ProcessAudit]:
-    with preprocess_image(
+    with preprocess_image_variants(
         image_path,
         temporary_root=temporary_root,
-    ) as preprocessed:
-        raw_payload = request_receipt_extraction(
-            preprocessed.path,
-            base_url=config.ollama.base_url,
-            model=config.ollama.model,
-            temperature=config.ollama.temperature,
-        )
-        extraction, validation, validation_audit = validate_receipt_payload_with_audit(
-            raw_payload,
+    ) as variants:
+        extraction_result = extract_with_variant_retry(
+            variants,
+            request=lambda variant_path: request_receipt_extraction(
+                variant_path,
+                base_url=config.ollama.base_url,
+                model=config.ollama.model,
+                temperature=config.ollama.temperature,
+            ),
             reference_date=reference_date,
             mode=mode,
         )
-        phash = preprocessed.phash
+        raw_payload = extraction_result.raw_payload
+        extraction = extraction_result.extraction
+        validation = extraction_result.validation
+        validation_audit = extraction_result.validation_audit
+        phash = extraction_result.phash
     try:
         initialize_database(config.data.root)
         with closing(connect_database(config.data.root)) as connection:

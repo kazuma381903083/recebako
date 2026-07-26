@@ -10,6 +10,8 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
+import recebako.pipeline.process as process_module
+import recebako.validation.receipt as validation_receipt_module
 from recebako.config import AppConfig
 from recebako.domain import IngestMode, ReceiptStatus
 from recebako.normalization import TaxNormalizationReason
@@ -19,6 +21,7 @@ from recebako.pipeline import (
     process_receipt,
     process_receipt_with_audit,
 )
+from recebako.storage import StorageError
 from recebako.validation import DateNormalizationOutcome, SchemaOutcome
 
 REFERENCE_DATE = date(2026, 7, 25)
@@ -143,6 +146,184 @@ def test_process_audit_marks_invalid_structure_and_skipped_duplicate_check(
     assert audit.date_normalization_outcome is DateNormalizationOutcome.NOT_EVALUATED
     assert audit.tax_normalization_reason is None
     assert audit.duplicate_outcome is DuplicateOutcome.NOT_EVALUATED
+
+
+def test_process_retry_persists_only_accepted_payload_and_runs_postprocessing_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = _image(tmp_path)
+    data_root = tmp_path / "data"
+    config = _config(data_root)
+    discarded_sentinel = "PRIVATE-DISCARDED-ATTEMPT-SENTINEL"
+    invalid_payload = json.dumps({"store": discarded_sentinel})
+    accepted_payload = _payload()
+    responses = iter([invalid_payload, accepted_payload])
+    request_calls: list[tuple[str, dict[str, Any]]] = []
+    stage_calls = {"tax": 0, "duplicate": 0, "save": 0}
+
+    def fake_request(path: Path, **kwargs: Any) -> str:
+        request_calls.append((path.name, dict(kwargs)))
+        return next(responses)
+
+    original_tax_normalization = (
+        validation_receipt_module.normalize_item_taxes_with_audit
+    )
+    original_find_duplicate = process_module.find_duplicate_candidate
+    original_repository_save = process_module.ReceiptRepository.save
+
+    def spy_tax_normalization(*args: Any, **kwargs: Any) -> Any:
+        stage_calls["tax"] += 1
+        return original_tax_normalization(*args, **kwargs)
+
+    def spy_find_duplicate(*args: Any, **kwargs: Any) -> Any:
+        stage_calls["duplicate"] += 1
+        return original_find_duplicate(*args, **kwargs)
+
+    def spy_repository_save(self: Any, record: Any) -> int:
+        stage_calls["save"] += 1
+        return original_repository_save(self, record)
+
+    monkeypatch.setattr(
+        process_module,
+        "request_receipt_extraction",
+        fake_request,
+    )
+    monkeypatch.setattr(
+        validation_receipt_module,
+        "normalize_item_taxes_with_audit",
+        spy_tax_normalization,
+    )
+    monkeypatch.setattr(
+        process_module,
+        "find_duplicate_candidate",
+        spy_find_duplicate,
+    )
+    monkeypatch.setattr(
+        process_module.ReceiptRepository,
+        "save",
+        spy_repository_save,
+    )
+
+    result, audit = _run_with_audit(image_path, config=config)
+
+    expected_settings = {
+        "base_url": "http://127.0.0.1:11434",
+        "model": "qwen3-vl:8b",
+        "temperature": 0,
+    }
+    assert request_calls == [
+        ("variant-1-standard.jpg", expected_settings),
+        ("variant-2-rotated-clockwise-90.jpg", expected_settings),
+    ]
+    assert stage_calls == {"tax": 1, "duplicate": 1, "save": 1}
+    assert result.status is ReceiptStatus.CONFIRMED
+    assert audit.schema_outcome is SchemaOutcome.VALID
+
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        stored = connection.execute("SELECT raw_payload_json FROM receipts").fetchall()
+        item_count = connection.execute("SELECT COUNT(*) FROM items").fetchone()
+
+    assert len(stored) == 1
+    assert json.loads(stored[0][0]) == json.loads(accepted_payload)
+    assert discarded_sentinel not in stored[0][0]
+    assert item_count == (1,)
+
+
+def test_process_three_schema_invalid_attempts_persist_only_final_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = _image(tmp_path)
+    data_root = tmp_path / "data"
+    invalid_payloads = [
+        json.dumps({"attempt_marker": attempt}) for attempt in range(1, 4)
+    ]
+    responses = iter(invalid_payloads)
+    request_paths: list[str] = []
+
+    def fake_request(path: Path, **kwargs: Any) -> str:
+        request_paths.append(path.name)
+        return next(responses)
+
+    monkeypatch.setattr(
+        process_module,
+        "request_receipt_extraction",
+        fake_request,
+    )
+
+    result, audit = _run_with_audit(
+        image_path,
+        config=_config(data_root),
+    )
+
+    assert request_paths == [
+        "variant-1-standard.jpg",
+        "variant-2-rotated-clockwise-90.jpg",
+        "variant-3-upscaled-2x.jpg",
+    ]
+    assert result.status is ReceiptStatus.FAILED
+    assert {issue.code for issue in result.validation_issues} == {"structure.invalid"}
+    assert audit.schema_outcome is SchemaOutcome.INVALID
+
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        stored = connection.execute(
+            "SELECT status, raw_payload_json FROM receipts"
+        ).fetchall()
+        item_count = connection.execute("SELECT COUNT(*) FROM items").fetchone()
+
+    assert len(stored) == 1
+    assert stored[0][0] == ReceiptStatus.FAILED.value
+    assert json.loads(stored[0][1]) == json.loads(invalid_payloads[-1])
+    assert item_count == (0,)
+
+
+def test_process_retry_rolls_back_receipt_when_item_insert_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = _image(tmp_path)
+    data_root = tmp_path / "data"
+    process_module.initialize_database(data_root)
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        connection.executescript(
+            """
+            CREATE TRIGGER fail_retry_item_insert
+            BEFORE INSERT ON items
+            BEGIN
+                SELECT RAISE(ABORT, 'forced retry item failure');
+            END;
+            """
+        )
+
+    responses = iter(['{"schema":"invalid"}', _payload()])
+    request_paths: list[str] = []
+
+    def fake_request(path: Path, **kwargs: Any) -> str:
+        request_paths.append(path.name)
+        return next(responses)
+
+    monkeypatch.setattr(
+        process_module,
+        "request_receipt_extraction",
+        fake_request,
+    )
+
+    with pytest.raises(StorageError, match="SQLiteへの保存"):
+        _run_with_audit(
+            image_path,
+            config=_config(data_root),
+        )
+
+    assert request_paths == [
+        "variant-1-standard.jpg",
+        "variant-2-rotated-clockwise-90.jpg",
+    ]
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        receipt_count = connection.execute("SELECT COUNT(*) FROM receipts").fetchone()
+        item_count = connection.execute("SELECT COUNT(*) FROM items").fetchone()
+    assert receipt_count == (0,)
+    assert item_count == (0,)
 
 
 def test_process_non_receipt_is_failed_without_private_result_values(

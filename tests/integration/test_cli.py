@@ -229,6 +229,43 @@ def test_extract_command_prints_json(
     assert not temporary_paths[0].exists()
 
 
+def test_extract_retries_invalid_response_and_prints_only_accepted_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image_path = tmp_path / "receipt.jpg"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    private_sentinel = "PRIVATE-DISCARDED-CLI-ATTEMPT"
+    calls: list[str] = []
+
+    def invalid_then_valid(path: Path) -> str:
+        calls.append(path.name)
+        if len(calls) == 1:
+            return json.dumps({"store": private_sentinel})
+        return _ollama_payload(receipt_date=_today().isoformat())
+
+    monkeypatch.setattr(
+        cli,
+        "request_receipt_extraction",
+        invalid_then_valid,
+    )
+
+    exit_code = cli.run(["extract", str(image_path)])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert calls == [
+        "variant-1-standard.jpg",
+        "variant-2-rotated-clockwise-90.jpg",
+    ]
+    assert output["status"] == "confirmed"
+    assert private_sentinel not in captured.out
+    assert captured.err == ""
+
+
 def test_extract_resolves_multiple_external_tax_rates_from_unique_subtotals(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -993,7 +1030,7 @@ def test_evaluate_run_keeps_mixed_model_failures_in_safe_json_and_isolated_dbs(
     def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
         model = str(kwargs["model"])
         calls_by_model[model] = calls_by_model.get(model, 0) + 1
-        if calls_by_model[model] == 1:
+        if calls_by_model[model] <= 3:
             raise OllamaTimeoutError(private_sentinel)
         return _ollama_payload(receipt_date="2026-07-25")
 
@@ -1019,7 +1056,7 @@ def test_evaluate_run_keeps_mixed_model_failures_in_safe_json_and_isolated_dbs(
     report = json.loads(captured.out)
     assert exit_code == 0
     assert captured.err == ""
-    assert calls_by_model == {"qwen3-vl:8b": 2, "qwen3.5:9b": 2}
+    assert calls_by_model == {"qwen3-vl:8b": 4, "qwen3.5:9b": 4}
     for model in report["models"]:
         assert [case["processing_success"] for case in model["cases"]] == [
             False,
