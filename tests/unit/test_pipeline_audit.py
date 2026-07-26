@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ def _image(tmp_path: Path) -> Path:
 
 def _payload(**overrides: Any) -> str:
     data: dict[str, Any] = {
+        "is_receipt": True,
         "store": "監査テスト店",
         "date": "2026-07-25",
         "time": "12:34",
@@ -140,6 +142,80 @@ def test_process_audit_marks_invalid_structure_and_skipped_duplicate_check(
     assert audit.schema_outcome is SchemaOutcome.INVALID
     assert audit.date_normalization_outcome is DateNormalizationOutcome.NOT_EVALUATED
     assert audit.tax_normalization_reason is None
+    assert audit.duplicate_outcome is DuplicateOutcome.NOT_EVALUATED
+
+
+def test_process_non_receipt_is_failed_without_private_result_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = _image(tmp_path)
+    data_root = tmp_path / "data"
+    private_sentinel = "PRIVATE-NON-RECEIPT-CONTENT"
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _payload(
+            is_receipt=False,
+            store=private_sentinel,
+            items=[{"name": private_sentinel, "qty": 1, "price": 100}],
+        ),
+    )
+
+    result, audit = _run_with_audit(
+        image_path,
+        config=_config(data_root),
+    )
+
+    assert result.status is ReceiptStatus.FAILED
+    assert result.store == ""
+    assert result.date_raw == ""
+    assert result.date == ""
+    assert result.total == 0
+    assert result.duplicate_of_id is None
+    assert {issue.code for issue in result.validation_issues} == {"receipt.not_receipt"}
+    assert audit.schema_outcome is SchemaOutcome.VALID
+    assert audit.date_normalization_outcome is DateNormalizationOutcome.NOT_EVALUATED
+    assert audit.tax_normalization_reason is None
+    assert audit.duplicate_outcome is DuplicateOutcome.NOT_EVALUATED
+    assert private_sentinel not in result.model_dump_json()
+    assert private_sentinel not in audit.model_dump_json()
+
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        stored = connection.execute(
+            """
+            SELECT status, store, date_raw, date, total, duplicate_of_id
+            FROM receipts
+            WHERE id = ?
+            """,
+            (result.receipt_id,),
+        ).fetchone()
+        item_count = connection.execute(
+            "SELECT COUNT(*) FROM items WHERE receipt_id = ?",
+            (result.receipt_id,),
+        ).fetchone()
+    assert stored == ("failed", "", "", "", 0, None)
+    assert item_count == (0,)
+
+
+def test_non_receipt_is_not_downgraded_to_review_by_duplicate_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = _image(tmp_path)
+    payloads = iter([_payload(), _payload(is_receipt=False)])
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: next(payloads),
+    )
+    config = _config(tmp_path / "data")
+
+    first, _ = _run_with_audit(image_path, config=config)
+    second, audit = _run_with_audit(image_path, config=config)
+
+    assert first.status is ReceiptStatus.CONFIRMED
+    assert second.status is ReceiptStatus.FAILED
+    assert second.duplicate_of_id is None
+    assert {issue.code for issue in second.validation_issues} == {"receipt.not_receipt"}
     assert audit.duplicate_outcome is DuplicateOutcome.NOT_EVALUATED
 
 

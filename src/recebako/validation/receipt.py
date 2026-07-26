@@ -56,6 +56,19 @@ def _issue(code: str, message: str, field: str) -> ValidationIssue:
     return ValidationIssue(code=code, message=message, field=field)
 
 
+def _not_receipt_result() -> ValidationResult:
+    return ValidationResult(
+        status=ReceiptStatus.FAILED,
+        issues=[
+            _issue(
+                "receipt.not_receipt",
+                "画像は店舗のレシートではありません",
+                "is_receipt",
+            )
+        ],
+    )
+
+
 def _parse_receipt_date(value: str) -> date | None:
     try:
         parsed = date.fromisoformat(value)
@@ -258,6 +271,9 @@ def validate_receipt(
     reference_date: date,
     mode: IngestMode = IngestMode.REGULAR,
 ) -> ValidationResult:
+    if not receipt.is_receipt:
+        return _not_receipt_result()
+
     normalized_receipt, tax_audit = _normalize_receipt_with_tax_audit(receipt)
     return _validate_normalized_receipt(
         normalized_receipt,
@@ -308,6 +324,17 @@ def validate_receipt_payload_with_audit(
             ),
             ValidationAudit(
                 schema_outcome=SchemaOutcome.INVALID,
+                date_normalization_outcome=(DateNormalizationOutcome.NOT_EVALUATED),
+                tax_normalization_reason=None,
+            ),
+        )
+
+    if not receipt.is_receipt:
+        return (
+            None,
+            _not_receipt_result(),
+            ValidationAudit(
+                schema_outcome=SchemaOutcome.VALID,
                 date_normalization_outcome=(DateNormalizationOutcome.NOT_EVALUATED),
                 tax_normalization_reason=None,
             ),

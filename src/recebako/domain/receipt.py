@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 PaymentMethod = Literal["cash", "credit", "qr", "emoney", "unknown"]
 
@@ -63,6 +63,9 @@ class ReceiptTaxBreakdown(BaseModel):
 class ReceiptExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    is_receipt: StrictBool = Field(
+        description="店舗のレシート画像ならtrue、それ以外ならfalse",
+    )
     store: str = Field(description="店名。読めなければ空文字")
     date: str = Field(description="YYYY-MM-DD。読めなければ空文字")
     time: str = ""
@@ -97,5 +100,6 @@ class NormalizedReceiptItem(ReceiptItem):
 
 
 class NormalizedReceiptExtraction(ReceiptExtraction):
+    is_receipt: Literal[True] = Field(default=True, exclude=True)
     items: Sequence[NormalizedReceiptItem]
     date_raw: str

@@ -24,6 +24,7 @@ REFERENCE_DATE = date(2026, 7, 25)
 
 def _receipt(**overrides: Any) -> ReceiptExtraction:
     data: dict[str, Any] = {
+        "is_receipt": True,
         "store": "テスト商店",
         "date": "2026-07-25",
         "time": "12:34",
@@ -143,6 +144,7 @@ def test_historical_mode_still_reviews_future_date() -> None:
         "{not-json",
         json.dumps(
             {
+                "is_receipt": True,
                 "store": "テスト商店",
                 "date": "2026-07-25",
                 "items": [],
@@ -154,6 +156,93 @@ def test_historical_mode_still_reviews_future_date() -> None:
 def test_invalid_json_or_structure_is_failed(payload: str) -> None:
     receipt, result = validate_receipt_payload(
         payload,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is None
+    assert result.status is ReceiptStatus.FAILED
+    assert {issue.code for issue in result.issues} == {"structure.invalid"}
+
+
+def test_non_receipt_is_failed_before_business_validation() -> None:
+    result = validate_receipt(
+        _receipt(
+            is_receipt=False,
+            store="",
+            date="not-a-date",
+            items=[],
+            total=0,
+            confidence=0.0,
+        ),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.status is ReceiptStatus.FAILED
+    assert [issue.model_dump(mode="json") for issue in result.issues] == [
+        {
+            "code": "receipt.not_receipt",
+            "message": "画像は店舗のレシートではありません",
+            "field": "is_receipt",
+        }
+    ]
+
+
+def test_non_receipt_payload_skips_normalization_and_returns_no_extraction() -> None:
+    receipt, result, audit = validate_receipt_payload_with_audit(
+        _receipt(
+            is_receipt=False,
+            date="not-a-date",
+            items=[
+                {
+                    "name": "外税候補",
+                    "price": 100,
+                    "price_raw": 100,
+                    "tax_rate": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            tax_breakdowns=[
+                {
+                    "tax_rate": 8,
+                    "taxable_amount": 100,
+                    "tax_amount": 8,
+                    "tax_treatment": "excluded",
+                }
+            ],
+            total=108,
+        ).model_dump_json(),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is None
+    assert result.status is ReceiptStatus.FAILED
+    assert {issue.code for issue in result.issues} == {"receipt.not_receipt"}
+    assert audit.schema_outcome is SchemaOutcome.VALID
+    assert audit.date_normalization_outcome is DateNormalizationOutcome.NOT_EVALUATED
+    assert audit.tax_normalization_reason is None
+
+
+def test_missing_is_receipt_is_invalid_structure() -> None:
+    payload = json.loads(_receipt().model_dump_json())
+    del payload["is_receipt"]
+
+    receipt, result = validate_receipt_payload(
+        json.dumps(payload),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is None
+    assert result.status is ReceiptStatus.FAILED
+    assert {issue.code for issue in result.issues} == {"structure.invalid"}
+
+
+@pytest.mark.parametrize("value", ["true", "false", 0, 1, None])
+def test_non_boolean_is_receipt_is_invalid_structure(value: object) -> None:
+    payload = json.loads(_receipt().model_dump_json())
+    payload["is_receipt"] = value
+
+    receipt, result = validate_receipt_payload(
+        json.dumps(payload),
         reference_date=REFERENCE_DATE,
     )
 

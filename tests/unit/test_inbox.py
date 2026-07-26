@@ -24,6 +24,7 @@ from recebako.runtime import (
 from recebako.storage import (
     ReceiptRepository,
     ReceiptWrite,
+    StorageError,
     connect_database,
 )
 from recebako.validation import validate_receipt_payload
@@ -56,9 +57,11 @@ def _payload(
     *,
     receipt_date: str = "2026-07-25",
     confidence: float = 0.99,
+    is_receipt: bool = True,
 ) -> str:
     return json.dumps(
         {
+            "is_receipt": is_receipt,
             "store": "テスト商店",
             "date": receipt_date,
             "time": "12:34",
@@ -213,6 +216,184 @@ def test_run_inbox_transition_failure_is_pending_until_next_run_recovers(
     assert finalized.image_path == "archive/2026/07/1_receipt.jpg"
     assert (data_root / finalized.image_path).is_file()
     assert list(paths.processing.iterdir()) == []
+
+
+def test_run_inbox_non_receipt_transition_recovers_without_second_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    paths, _ = initialize_runtime(data_root)
+    _write_image(paths.inbox / "image.jpg")
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _payload(
+            receipt_date="not-a-date",
+            is_receipt=False,
+        ),
+    )
+    original_move_to_final = inbox_module.move_to_final
+
+    def fail_final_move(*args: Any, **kwargs: Any) -> Path:
+        raise RuntimeFileError("forced final move failure")
+
+    monkeypatch.setattr(inbox_module, "move_to_final", fail_final_move)
+
+    interrupted = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert interrupted.failed == 1
+    assert interrupted.results[0].receipt_id == 1
+    assert interrupted.results[0].error_code == "filesystem.transition"
+    with closing(connect_database(data_root)) as connection:
+        pending = ReceiptRepository(connection).get(1)
+    assert pending is not None
+    assert pending.status is ReceiptStatus.FAILED
+    assert pending.file_state is ReceiptFileState.PENDING
+    assert pending.image_path.startswith("processing/")
+    assert pending.store == ""
+    assert pending.items == []
+
+    monkeypatch.setattr(inbox_module, "move_to_final", original_move_to_final)
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: pytest.fail(
+            "pending non-receipt must not be re-extracted"
+        ),
+    )
+
+    recovered = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert recovered.processed == 0
+    with closing(connect_database(data_root)) as connection:
+        finalized = ReceiptRepository(connection).get(1)
+        count = connection.execute("SELECT COUNT(*) FROM receipts").fetchone()
+    assert finalized is not None
+    assert finalized.status is ReceiptStatus.FAILED
+    assert finalized.file_state is ReceiptFileState.FINALIZED
+    assert finalized.image_path == "failed/1_image.jpg"
+    assert (data_root / finalized.image_path).is_file()
+    assert count is not None
+    assert count[0] == 1
+    assert list(paths.processing.iterdir()) == []
+
+
+def test_run_inbox_repairs_non_receipt_after_database_finalize_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    paths, _ = initialize_runtime(data_root)
+    _write_image(paths.inbox / "image.jpg")
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: _payload(is_receipt=False),
+    )
+    original_finalize = ReceiptRepository.finalize_image_path
+
+    def fail_finalize(
+        self: ReceiptRepository,
+        receipt_id: int,
+        image_path: Path,
+    ) -> None:
+        raise StorageError("forced database finalize failure")
+
+    monkeypatch.setattr(ReceiptRepository, "finalize_image_path", fail_finalize)
+
+    interrupted = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert interrupted.failed == 1
+    assert interrupted.results[0].receipt_id == 1
+    assert interrupted.results[0].destination == "failed/1_image.jpg"
+    assert interrupted.results[0].error_code == "storage.unavailable"
+    with closing(connect_database(data_root)) as connection:
+        pending = ReceiptRepository(connection).get(1)
+    assert pending is not None
+    assert pending.status is ReceiptStatus.FAILED
+    assert pending.file_state is ReceiptFileState.PENDING
+    assert pending.image_path.startswith("processing/")
+    assert not (data_root / pending.image_path).exists()
+    assert (paths.failed / "1_image.jpg").is_file()
+
+    monkeypatch.setattr(ReceiptRepository, "finalize_image_path", original_finalize)
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: pytest.fail(
+            "moved non-receipt must not be re-extracted"
+        ),
+    )
+
+    recovered = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert recovered.processed == 0
+    with closing(connect_database(data_root)) as connection:
+        finalized = ReceiptRepository(connection).get(1)
+        count = connection.execute("SELECT COUNT(*) FROM receipts").fetchone()
+    assert finalized is not None
+    assert finalized.status is ReceiptStatus.FAILED
+    assert finalized.file_state is ReceiptFileState.FINALIZED
+    assert finalized.image_path == "failed/1_image.jpg"
+    assert count is not None
+    assert count[0] == 1
+
+
+def test_run_inbox_routes_non_receipt_to_failed_with_safe_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    source = data_root / "inbox" / "image.jpg"
+    original_bytes = _write_image(source)
+    private_sentinel = "PRIVATE-NON-RECEIPT-CONTENT"
+    payload = json.loads(_payload(is_receipt=False))
+    payload["store"] = private_sentinel
+    payload["items"] = [{"name": private_sentinel, "qty": 1, "price": 100}]
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: json.dumps(payload),
+    )
+
+    result = run_inbox(
+        config=_config(data_root),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert result.failed == 1
+    assert result.confirmed == 0
+    assert result.review == 0
+    item = result.results[0]
+    assert item.status is ReceiptStatus.FAILED
+    assert item.receipt_id == 1
+    assert item.destination == "failed/1_image.jpg"
+    assert item.error_code is None
+    assert (data_root / item.destination).read_bytes() == original_bytes
+    assert private_sentinel not in result.model_dump_json()
+    with closing(connect_database(data_root)) as connection:
+        stored = ReceiptRepository(connection).get(1)
+    assert stored is not None
+    assert stored.status is ReceiptStatus.FAILED
+    assert stored.file_state is ReceiptFileState.FINALIZED
+    assert stored.store == ""
+    assert stored.items == []
+    assert {issue["code"] for issue in stored.validation_issues} == {
+        "receipt.not_receipt"
+    }
 
 
 def test_run_inbox_confirms_archives_and_saves_relative_path(

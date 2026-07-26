@@ -272,8 +272,9 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
   <p>VLMの出力をこのスキーマに<strong>強制</strong>する（Ollamaの<code>format</code>パラメータに渡す）。自由文を一切許さないことで後段が壊れなくなる。</p>
 <pre><span class="out">{
   "type": "object",
-  "required": ["store", "date", "total", "items", "confidence"],
+  "required": ["is_receipt", "store", "date", "total", "items", "confidence"],
   "properties": {
+    "is_receipt": {"type": "boolean", "description": "店舗のレシート画像ならtrue、それ以外ならfalse"},
     "store":      {"type": "string",  "description": "店名。読めなければ空文字"},
     "date":       {"type": "string",  "description": "YYYY-MM-DD。読めなければ空文字"},
     "time":       {"type": "string"},
@@ -293,7 +294,7 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
     "confidence": {"type": "number",  "description": "読み取り自信度 0.0-1.0"}
   }
 }</span></pre>
-  <div class="beginner">「読めない項目は<strong>空文字や0で埋めさせる</strong>」のがコツ。無理に埋めさせると幻覚（それっぽい嘘）が混入する。<code>confidence</code>を自己申告させ、低いものは要確認行きにする。</div>
+  <div class="beginner">「読めない項目は<strong>空文字や0で埋めさせる</strong>」のがコツ。無理に埋めさせると幻覚（それっぽい嘘）が混入する。<code>is_receipt=false</code>なら他項目を中立値にして即failedへ隔離する。<code>confidence</code>を自己申告させ、低いレシートは要確認行きにする。</div>
   <h3><span class="hn">5-2</span>SQLiteテーブル定義</h3>
 <pre><span class="k">CREATE TABLE</span> receipts (
   id          INTEGER PRIMARY KEY,
@@ -328,7 +329,7 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
 
 状態遷移:  inbox → processing → ┬→ confirmed(archive/ + DB確定)
                                 ├→ review  (自信度低・整合NG)
-                                └→ failed  (抽出3回失敗)</span></pre>
+                                └→ failed  (抽出3回失敗、非レシートは即時)</span></pre>
   <p class="note">※ フォルダ＝状態にすると、DBを開かなくても<code>ls</code>で系の健全性がわかる。障害対応でログとキューを最初に見る癖のある人間には馴染む設計のはず。</p>
 </section>
 
@@ -345,13 +346,15 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
     "role": "user",
     "images": ["(base64画像)"],
     "content":
-      "これは日本の店舗のレシート画像です。記載内容を読み取ってください。\n\
+      "入力画像が日本の店舗のレシートかを判定し、レシートなら記載内容を読み取ってください。\n\
        ルール:\n\
-       1. 画像に書かれている情報だけを使う。推測で補完しない\n\
-       2. 読み取れない項目は空文字または0にする\n\
-       3. 金額は税込の整数(円)。カンマは除去\n\
-       4. 値引き行はpriceを負の値にする\n\
-       5. 全体の読み取りに対する自信をconfidenceに0.0-1.0で正直に申告する"
+       1. 店舗のレシートならis_receipt=true、それ以外ならfalseにする\n\
+       2. falseの場合は他項目を空文字・空配列・0等にし、推測で情報を作らない\n\
+       3. 画像に書かれている情報だけを使う。推測で補完しない\n\
+       4. 読み取れない項目は空文字または0にする\n\
+       5. 金額は税込の整数(円)。カンマは除去\n\
+       6. 値引き行はpriceを負の値にする\n\
+       7. 判定と読み取りに対する自信をconfidenceに0.0-1.0で正直に申告する"
   }]
 }</span></pre>
   <h3><span class="hn">6-2</span>検証ロジック — 「三値管理」で品質を作る</h3>
@@ -362,6 +365,7 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
     <tr><td>日付妥当性</td><td>date が過去1年以内の実在日付</td><td class="c">review</td></tr>
     <tr><td>自信度</td><td>confidence ≥ 0.8</td><td class="c">review</td></tr>
     <tr><td>重複</td><td>pHash距離が近い既存画像なし、かつ (store,date,total) の完全一致なし</td><td class="c">review(重複疑い)</td></tr>
+    <tr><td>非レシート</td><td><code>is_receipt=false</code>。日付・税・重複検証は行わない</td><td class="c">再試行せず即failed</td></tr>
     <tr><td>抽出成功</td><td>JSONパース成功かつ必須項目あり。失敗時は画像を回転/拡大して最大3回再試行</td><td class="c">3回失敗で failed</td></tr>
   </table></div>
   <h3><span class="hn">6-3</span>費目分類 — 2段構え</h3>

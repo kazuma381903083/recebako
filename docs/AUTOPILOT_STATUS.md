@@ -1,7 +1,7 @@
 # Recebako Autopilot Status
 
 更新日: 2026-07-26
-作業ブランチ: `docs/42-baseline-acceptance`
+作業ブランチ: `issue/3-non-receipt-detection`
 
 ## Phase 1C
 
@@ -24,6 +24,7 @@
 - Pull Request [#63](https://github.com/kazuma381903083/recebako/pull/63)はmainへmerge済み
 - Pull Request [#64](https://github.com/kazuma381903083/recebako/pull/64)はmainへmerge済み
 - Issue #42はユーザーが22/30 verifiedの現行baselineを受け入れたためclose済み
+- Issue #3の起点mainはPR #64のmerge commit `a59ebb5`
 
 ## Phase 2 private evaluation
 
@@ -71,8 +72,25 @@
 - 残る8件は現行baselineの完了条件に含めない。追加入力が必要になってもAI出力から
   ground truthを生成・変更しない
 
+## Phase 2 non-receipt safety
+
+- 状態: Issue #3の実装、回帰test、仕様更新、全検査を作業ブランチで完了
+- 対象Issue: `#3`
+- schema: top-level必須のstrict boolean `is_receipt`をOllama formatへ追加。欠落、
+  文字列、数値、nullはcoerceせず`structure.invalid`でfailed
+- 判定: `is_receipt=false`はschema validのまま`receipt.not_receipt`で即failed。
+  日付、税、重複は評価せず、normalized extractionを後段へ渡さない
+- 状態遷移: 既存transactionでfailed rowをpending保存し、画像を`failed/`へ移動して
+  finalized。中断後は再抽出せず同じrowを回復する
+- 互換性: 正常レシートのconfirmed/review、既存CLI成功JSON、評価report schemaを
+  維持。raw extraction schemaとpromptのhashは意図どおり更新
+- private境界: private画像を使用せず、合成画像とmock Ollama応答だけで検証。
+  固定issue code以外の入力内容をresult、audit、stdoutへ出さない
+- DB migration、新規依存、外部AI、モデル既定値、confidence閾値の変更なし
+- 自動検査: private-file scan、ruff、format、mypy、358 tests、diff checks成功
+
 ## Remaining
 
-1. 22/30 baselineを現状の評価として維持し、confirmed率をaccuracyと表現しない
-2. 追加のground truthが必要になった場合だけ、人間が入力して評価集合を明記する
-3. 次のIssueは依存関係と優先順位に従って進める
+1. Issue #3を独立commitとしてpushし、main向けPull Requestを作成する
+2. 次の依存なしP0、またはIssue #3を前提にするIssue #4へ進む
+3. 22/30 baselineは現状の評価として維持し、confirmed率をaccuracyと表現しない
