@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import stat
+from contextlib import closing
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import recebako.evaluation.runner as runner_module
 from recebako.ai import OllamaTimeoutError
+from recebako.ai.ollama import EXTRACTION_PROMPT
 from recebako.config import AppConfig
 from recebako.domain import (
     IngestMode,
+    ReceiptExtraction,
     ReceiptStatus,
     TaxTreatment,
     ValidationIssue,
@@ -22,13 +27,19 @@ from recebako.domain import (
 from recebako.evaluation import (
     AccuracyStatus,
     AccuracyUnknownReason,
+    CaseEvaluationResult,
     DateOutcome,
     DuplicateOutcome,
     EvaluationStatus,
+    ModelEvaluationSummary,
+    QualityAssessmentStatus,
+    QualityBaselineReport,
+    QualityUnknownReason,
     SchemaOutcome,
     TaxOutcome,
 )
 from recebako.evaluation.dataset import discover_cases
+from recebako.evaluation.quality import _QualityCounts
 from recebako.evaluation.runner import (
     EvaluationRunError,
     EvaluationRunErrorCode,
@@ -166,59 +177,130 @@ def _assert_safe_report_shape(payload: dict[str, Any]) -> None:
                 "error_code",
                 "validation_issue_codes",
             }
-        assert set(model["summary"]) == {
-            "case_count",
-            "processing_success_count",
-            "processing_success_rate",
-            "schema_success_count",
-            "schema_success_rate",
-            "confirmed_rate",
-            "review_rate",
-            "failed_rate",
-            "tax_applied_count",
-            "tax_rejected_count",
-            "status_counts",
-            "schema_outcome_counts",
-            "date_outcome_counts",
-            "tax_outcome_counts",
-            "duplicate_outcome_counts",
-            "error_code_counts",
-            "validation_issue_code_counts",
-            "duration",
+        _assert_summary_shape(model["summary"])
+        _assert_accuracy_shape(model["accuracy"])
+
+
+def _assert_summary_shape(summary: dict[str, Any]) -> None:
+    assert set(summary) == {
+        "case_count",
+        "processing_success_count",
+        "processing_success_rate",
+        "schema_success_count",
+        "schema_success_rate",
+        "confirmed_rate",
+        "review_rate",
+        "failed_rate",
+        "tax_applied_count",
+        "tax_rejected_count",
+        "status_counts",
+        "schema_outcome_counts",
+        "date_outcome_counts",
+        "tax_outcome_counts",
+        "duplicate_outcome_counts",
+        "error_code_counts",
+        "validation_issue_code_counts",
+        "duration",
+    }
+    assert set(summary["duration"]) == {
+        "sample_count",
+        "total_ms",
+        "minimum_ms",
+        "maximum_ms",
+        "mean_ms",
+    }
+
+
+def _assert_accuracy_shape(accuracy: dict[str, Any]) -> None:
+    assert set(accuracy) == {
+        "status",
+        "reason",
+        "verified_case_count",
+        "store",
+        "date",
+        "total",
+        "receipt_status",
+        "item_name",
+        "item_quantity",
+        "item_price",
+    }
+    for field_name in (
+        "store",
+        "date",
+        "total",
+        "receipt_status",
+        "item_name",
+        "item_quantity",
+        "item_price",
+    ):
+        assert set(accuracy[field_name]) == {
+            "comparable_count",
+            "correct_count",
+            "accuracy_rate",
         }
-        assert set(model["summary"]["duration"]) == {
-            "sample_count",
-            "total_ms",
-            "minimum_ms",
-            "maximum_ms",
-            "mean_ms",
+
+
+def _assert_safe_quality_sidecar_shape(payload: dict[str, Any]) -> None:
+    assert set(payload) == {"schema_version", "run_id", "models"}
+    for model in payload["models"]:
+        assert set(model) == {"provenance", "summary", "accuracy", "quality"}
+        assert set(model["provenance"]) == {
+            "metric_version",
+            "model_name",
+            "prompt_sha256",
+            "extraction_schema_sha256",
         }
-        assert set(model["accuracy"]) == {
-            "status",
-            "reason",
+        _assert_summary_shape(model["summary"])
+        _assert_accuracy_shape(model["accuracy"])
+        quality = model["quality"]
+        assert set(quality) == {
+            "metric_version",
+            "required_verified_case_count",
+            "target_case_count",
             "verified_case_count",
-            "store",
-            "date",
-            "total",
-            "receipt_status",
-            "item_name",
-            "item_quantity",
-            "item_price",
+            "golden_set_complete",
+            "total_accuracy",
+            "store_accuracy",
+            "date_accuracy",
+            "item_accuracy",
+            "false_confirmation_rate",
+            "review_rate",
+            "thresholds",
+            "q1_total",
+            "q2_store_and_date",
+            "q3_items",
+            "q4_false_confirmation",
+            "q5_review",
         }
         for field_name in (
-            "store",
-            "date",
-            "total",
-            "receipt_status",
-            "item_name",
-            "item_quantity",
-            "item_price",
+            "total_accuracy",
+            "store_accuracy",
+            "date_accuracy",
+            "item_accuracy",
+            "false_confirmation_rate",
+            "review_rate",
         ):
-            assert set(model["accuracy"][field_name]) == {
-                "comparable_count",
-                "correct_count",
-                "accuracy_rate",
+            assert set(quality[field_name]) == {
+                "denominator_count",
+                "numerator_count",
+                "rate",
             }
+        assert set(quality["thresholds"]) == {
+            "q1_total_minimum",
+            "q2_store_minimum",
+            "q2_date_minimum",
+            "q3_items_minimum",
+            "q4_false_confirmation_maximum",
+            "q5_review_maximum",
+        }
+        for field_name in (
+            "q1_total",
+            "q2_store_and_date",
+            "q3_items",
+            "q4_false_confirmation",
+            "q5_review",
+        ):
+            assert set(quality[field_name]) == {"status", "reason"}
 
 
 def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_report(
@@ -320,8 +402,17 @@ def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_repor
     assert _mode(report_path) == 0o600
     report_text = report_path.read_text(encoding="utf-8")
     payload = json.loads(report_text)
+    assert payload["schema_version"] == 1
     assert payload == report.model_dump(mode="json")
     _assert_safe_report_shape(payload)
+    quality_report_path = run_root / "quality-baseline-report.json"
+    assert _mode(quality_report_path) == 0o600
+    quality_report_text = quality_report_path.read_text(encoding="utf-8")
+    quality_payload = json.loads(quality_report_text)
+    quality_report = QualityBaselineReport.model_validate(quality_payload)
+    assert quality_payload["schema_version"] == 1
+    assert quality_payload == quality_report.model_dump(mode="json")
+    _assert_safe_quality_sidecar_shape(quality_payload)
     for forbidden in (
         PRIVATE_SENTINEL,
         str(source_root),
@@ -339,11 +430,21 @@ def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_repor
         "987654",
     ):
         assert forbidden not in report_text
+        assert forbidden not in quality_report_text
+    assert "case_id" not in quality_report_text
+    assert all(case_id not in quality_report_text for case_id in expected_contents)
     assert all(
         model.accuracy.status is AccuracyStatus.UNKNOWN
         and model.accuracy.reason
         is AccuracyUnknownReason.NO_HUMAN_VERIFIED_GROUND_TRUTH
         for model in report.models
+    )
+    assert all(
+        model.quality.verified_case_count == 0
+        and not model.quality.golden_set_complete
+        and model.quality.q1_total.status is QualityAssessmentStatus.UNKNOWN
+        and model.quality.q1_total.reason is QualityUnknownReason.INCOMPLETE_GOLDEN_SET
+        for model in quality_report.models
     )
 
 
@@ -686,6 +787,72 @@ def test_copy_case_collision_preserves_existing_destination_and_source(
     assert _source_snapshot(case.source_path) == source_snapshot
 
 
+def test_quality_report_temp_collision_preserves_existing_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root_path = tmp_path / "run"
+    run_root_path.mkdir()
+    existing = run_root_path / ".quality-baseline-report-fixed.tmp"
+    existing.write_bytes(b"existing")
+    monkeypatch.setattr(
+        runner_module.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="fixed"),
+    )
+
+    with (
+        closing(
+            runner_module._pin_existing_directory(
+                run_root_path,
+                error_code=EvaluationRunErrorCode.RUNTIME_UNAVAILABLE,
+            )
+        ) as run_root,
+        pytest.raises(EvaluationRunError) as error,
+    ):
+        runner_module._write_quality_report(
+            QualityBaselineReport(run_id="run-test", models=()),
+            run_root,
+        )
+
+    assert error.value.code is EvaluationRunErrorCode.REPORT_WRITE_FAILED
+    assert existing.read_bytes() == b"existing"
+    assert not (run_root_path / "quality-baseline-report.json").exists()
+
+
+def test_quality_report_final_collision_does_not_overwrite_or_leave_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root_path = tmp_path / "run"
+    run_root_path.mkdir()
+    existing = run_root_path / "quality-baseline-report.json"
+    existing.write_bytes(b"existing")
+    monkeypatch.setattr(
+        runner_module.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="fixed"),
+    )
+
+    with (
+        closing(
+            runner_module._pin_existing_directory(
+                run_root_path,
+                error_code=EvaluationRunErrorCode.RUNTIME_UNAVAILABLE,
+            )
+        ) as run_root,
+        pytest.raises(EvaluationRunError) as error,
+    ):
+        runner_module._write_quality_report(
+            QualityBaselineReport(run_id="run-test", models=()),
+            run_root,
+        )
+
+    assert error.value.code is EvaluationRunErrorCode.REPORT_WRITE_FAILED
+    assert existing.read_bytes() == b"existing"
+    assert not (run_root_path / ".quality-baseline-report-fixed.tmp").exists()
+
+
 def _write_verified_truth(path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=TRUTH_CSV_HEADERS)
@@ -720,7 +887,7 @@ def test_run_evaluation_reports_only_aggregate_ground_truth_accuracy(
         "process_receipt_with_audit",
         lambda *args, **kwargs: (
             _private_process_result(
-                store=f"{PRIVATE_SENTINEL}-store",
+                store=f" {PRIVATE_SENTINEL}-STORE ",
                 receipt_date="2026-07-25",
                 total=987_654,
             ),
@@ -739,6 +906,19 @@ def test_run_evaluation_reports_only_aggregate_ground_truth_accuracy(
                 qty=2,
                 price=333,
                 price_raw=333,
+                tax_rate=None,
+                tax_treatment=TaxTreatment.UNKNOWN,
+                tax_adjustment=0,
+                category=None,
+            ),
+            StoredItem(
+                id=502,
+                receipt_id=71,
+                name=f"{PRIVATE_SENTINEL}-extra-item",
+                name_norm=None,
+                qty=1,
+                price=444,
+                price_raw=444,
                 tax_rate=None,
                 tax_treatment=TaxTreatment.UNKNOWN,
                 tax_adjustment=0,
@@ -765,27 +945,317 @@ def test_run_evaluation_reports_only_aggregate_ground_truth_accuracy(
     assert accuracy.verified_case_count == 1
     assert accuracy.store.model_dump() == {
         "comparable_count": 1,
-        "correct_count": 1,
-        "accuracy_rate": 1.0,
+        "correct_count": 0,
+        "accuracy_rate": 0.0,
     }
     assert accuracy.date.correct_count == 1
     assert accuracy.total.correct_count == 1
     assert accuracy.receipt_status.correct_count == 1
     assert accuracy.item_name.correct_count == 1
+    assert accuracy.item_name.comparable_count == 2
     assert accuracy.item_quantity.correct_count == 1
+    assert accuracy.item_quantity.comparable_count == 2
     assert accuracy.item_price.model_dump() == {
-        "comparable_count": 1,
+        "comparable_count": 2,
         "correct_count": 0,
         "accuracy_rate": 0.0,
     }
-    report_text = (
-        tmp_path / "output" / "run-accuracy" / "evaluation-report.json"
-    ).read_text(encoding="utf-8")
+    run_root = tmp_path / "output" / "run-accuracy"
+    quality_report_path = run_root / "quality-baseline-report.json"
+    quality_report_text = quality_report_path.read_text(encoding="utf-8")
+    quality_report = QualityBaselineReport.model_validate_json(quality_report_text)
+    quality_model = quality_report.models[0]
+    quality = quality_model.quality
+    assert quality_report.schema_version == 1
+    assert quality_report.run_id == report.run_id
+    assert quality_model.provenance.metric_version == "quality-v1"
+    assert quality_model.provenance.model_name == "qwen3-vl:8b"
+    assert quality.metric_version == "quality-v1"
+    assert quality.verified_case_count == 1
+    assert not quality.golden_set_complete
+    assert quality.total_accuracy.rate == 1.0
+    assert quality.store_accuracy.rate == 1.0
+    assert quality.date_accuracy.rate == 1.0
+    assert quality.item_accuracy.rate == 0.0
+    assert quality.item_accuracy.denominator_count == 2
+    assert quality.false_confirmation_rate.rate == 0.0
+    assert quality.review_rate.rate == 0.0
+    assert quality.q1_total.status is QualityAssessmentStatus.UNKNOWN
+    assert quality.q1_total.reason is QualityUnknownReason.INCOMPLETE_GOLDEN_SET
+    expected_schema_json = json.dumps(
+        ReceiptExtraction.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert (
+        quality_model.provenance.prompt_sha256
+        == hashlib.sha256(EXTRACTION_PROMPT.encode("utf-8")).hexdigest()
+    )
+    assert (
+        quality_model.provenance.extraction_schema_sha256
+        == hashlib.sha256(expected_schema_json.encode("utf-8")).hexdigest()
+    )
+    report_text = (run_root / "evaluation-report.json").read_text(encoding="utf-8")
+    report_payload = json.loads(report_text)
+    assert report_payload["schema_version"] == 1
+    _assert_safe_report_shape(report_payload)
+    quality_payload = json.loads(quality_report_text)
+    _assert_safe_quality_sidecar_shape(quality_payload)
     for forbidden in (
         PRIVATE_SENTINEL,
         "987654",
         "222",
         "333",
+        "444",
         str(truth_path),
+        str(source_root),
     ):
         assert forbidden not in report_text
+        assert forbidden not in quality_report_text
+    assert "case_id" not in quality_report_text
+    assert "case-0001" not in quality_report_text
+
+
+@pytest.mark.parametrize("unavailable_truth", ["missing", "unverified"])
+def test_quality_sidecar_keeps_incomplete_30_case_truth_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unavailable_truth: str,
+) -> None:
+    source_root = tmp_path / "source"
+    _write_cases(source_root, count=30)
+    truth_path = tmp_path / "truth.csv"
+    with truth_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=TRUTH_CSV_HEADERS)
+        writer.writeheader()
+        for index in range(1, 31):
+            if index == 30 and unavailable_truth == "missing":
+                continue
+            row = {field_name: "" for field_name in TRUTH_CSV_HEADERS}
+            row["case_id"] = f"case-{index:04d}"
+            if index == 30:
+                row["human_verified"] = "false"
+            else:
+                row.update(
+                    {
+                        "human_verified": "true",
+                        "expected_store": PRIVATE_SENTINEL,
+                        "expected_date": "2026-07-25",
+                        "expected_total": "987654",
+                        "expected_status": "confirmed",
+                        "item_index": "0",
+                        "expected_item_name": f"{PRIVATE_SENTINEL}-item",
+                        "expected_item_qty": "1",
+                        "expected_item_price": "100",
+                    }
+                )
+            writer.writerow(row)
+
+    monkeypatch.setattr(
+        runner_module,
+        "process_receipt_with_audit",
+        lambda *args, **kwargs: (_private_process_result(), _process_audit()),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_stored_items",
+        lambda *args, **kwargs: (
+            StoredItem(
+                id=501,
+                receipt_id=71,
+                name=f"{PRIVATE_SENTINEL}-item",
+                name_norm=None,
+                qty=1,
+                price=100,
+                price_raw=100,
+                tax_rate=None,
+                tax_treatment=TaxTreatment.UNKNOWN,
+                tax_adjustment=0,
+                category=None,
+            ),
+        ),
+    )
+
+    report = run_evaluation(
+        source_root,
+        output_root=tmp_path / "output",
+        base_config=_config(tmp_path / "production"),
+        mode=IngestMode.REGULAR,
+        reference_date=REFERENCE_DATE,
+        ground_truth_path=truth_path,
+        models=("qwen3-vl:8b",),
+        clock=_StepClock(),
+        run_id_factory=lambda: f"run-{unavailable_truth}",
+    )
+    quality_report = QualityBaselineReport.model_validate_json(
+        (
+            tmp_path
+            / "output"
+            / f"run-{unavailable_truth}"
+            / "quality-baseline-report.json"
+        ).read_text(encoding="utf-8")
+    )
+    quality = quality_report.models[0].quality
+
+    assert report.models[0].accuracy.verified_case_count == 29
+    assert quality.target_case_count == 30
+    assert quality.verified_case_count == 29
+    assert not quality.golden_set_complete
+    assert all(
+        assessment.status is QualityAssessmentStatus.UNKNOWN
+        and assessment.reason is QualityUnknownReason.INCOMPLETE_GOLDEN_SET
+        for assessment in (
+            quality.q1_total,
+            quality.q2_store_and_date,
+            quality.q3_items,
+            quality.q4_false_confirmation,
+            quality.q5_review,
+        )
+    )
+
+
+def _quality_counts(
+    *,
+    verified: int = 30,
+    total_correct: int = 30,
+    store_correct: int = 30,
+    date_correct: int = 30,
+    item_comparable: int = 100,
+    item_correct: int = 100,
+    confirmed: int = 30,
+    false_confirmed: int = 0,
+) -> _QualityCounts:
+    return _QualityCounts(
+        verified_case_count=verified,
+        store_correct_count=store_correct,
+        date_correct_count=date_correct,
+        total_correct_count=total_correct,
+        item_comparable_count=item_comparable,
+        item_correct_count=item_correct,
+        confirmed_count=confirmed,
+        false_confirmed_count=false_confirmed,
+    )
+
+
+def _quality_operational_summary(
+    *,
+    case_count: int = 30,
+    review_count: int = 0,
+    failed_count: int = 0,
+) -> ModelEvaluationSummary:
+    cases = tuple(
+        CaseEvaluationResult(
+            case_id=f"case-{index:04d}",
+            processing_success=True,
+            schema_outcome=SchemaOutcome.VALID,
+            date_outcome=DateOutcome.UNCHANGED,
+            tax_outcome=TaxOutcome.NOT_NEEDED,
+            duplicate_outcome=DuplicateOutcome.NONE,
+            status=(
+                EvaluationStatus.REVIEW
+                if index <= review_count
+                else (
+                    EvaluationStatus.FAILED
+                    if index <= review_count + failed_count
+                    else EvaluationStatus.CONFIRMED
+                )
+            ),
+            elapsed_ms=1,
+        )
+        for index in range(1, case_count + 1)
+    )
+    return runner_module._summarize(cases)
+
+
+def test_quality_v1_marks_all_targets_met_at_their_boundaries() -> None:
+    quality = runner_module._quality_baseline(
+        _quality_counts(
+            total_correct=30,
+            store_correct=29,
+            date_correct=29,
+            item_correct=80,
+            confirmed=21,
+            false_confirmed=0,
+        ),
+        _quality_operational_summary(review_count=9),
+    )
+
+    assert quality.golden_set_complete
+    assert quality.q1_total.status is QualityAssessmentStatus.MET
+    assert quality.q2_store_and_date.status is QualityAssessmentStatus.MET
+    assert quality.q3_items.status is QualityAssessmentStatus.MET
+    assert quality.q4_false_confirmation.status is QualityAssessmentStatus.MET
+    assert quality.q5_review.status is QualityAssessmentStatus.MET
+
+
+@pytest.mark.parametrize(
+    ("counts", "review_count", "field_name"),
+    [
+        (
+            _quality_counts(total_correct=29, false_confirmed=1),
+            0,
+            "q1_total",
+        ),
+        (_quality_counts(store_correct=28), 0, "q2_store_and_date"),
+        (_quality_counts(date_correct=28), 0, "q2_store_and_date"),
+        (_quality_counts(item_correct=79), 0, "q3_items"),
+        (
+            _quality_counts(total_correct=29, confirmed=30, false_confirmed=1),
+            0,
+            "q4_false_confirmation",
+        ),
+        (_quality_counts(confirmed=20), 10, "q5_review"),
+    ],
+)
+def test_quality_v1_marks_each_threshold_miss_not_met(
+    counts: _QualityCounts,
+    review_count: int,
+    field_name: str,
+) -> None:
+    quality = runner_module._quality_baseline(
+        counts,
+        _quality_operational_summary(review_count=review_count),
+    )
+
+    assert getattr(quality, field_name).status is QualityAssessmentStatus.NOT_MET
+
+
+def test_quality_v1_keeps_incomplete_truth_and_zero_confirmed_unknown() -> None:
+    incomplete = runner_module._quality_baseline(
+        _quality_counts(
+            verified=29,
+            total_correct=29,
+            store_correct=29,
+            date_correct=29,
+            confirmed=29,
+        ),
+        _quality_operational_summary(),
+    )
+    assert not incomplete.golden_set_complete
+    assert all(
+        assessment.status is QualityAssessmentStatus.UNKNOWN
+        and assessment.reason is QualityUnknownReason.INCOMPLETE_GOLDEN_SET
+        for assessment in (
+            incomplete.q1_total,
+            incomplete.q2_store_and_date,
+            incomplete.q3_items,
+            incomplete.q4_false_confirmation,
+            incomplete.q5_review,
+        )
+    )
+
+    no_confirmed = runner_module._quality_baseline(
+        _quality_counts(confirmed=0),
+        _quality_operational_summary(review_count=0, failed_count=30),
+    )
+    assert no_confirmed.false_confirmation_rate.denominator_count == 0
+    assert no_confirmed.false_confirmation_rate.rate is None
+    assert no_confirmed.q4_false_confirmation.status is QualityAssessmentStatus.UNKNOWN
+    assert (
+        no_confirmed.q4_false_confirmation.reason
+        is QualityUnknownReason.ZERO_DENOMINATOR
+    )
+    assert no_confirmed.review_rate.numerator_count == 0
+    assert no_confirmed.review_rate.rate == 0.0
+    assert no_confirmed.q5_review.status is QualityAssessmentStatus.MET

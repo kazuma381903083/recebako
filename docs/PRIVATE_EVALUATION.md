@@ -64,6 +64,11 @@ For a verified case:
 - number `item_index` contiguously from `0`;
 - use `true` for `human_verified`;
 - use `confirmed`, `review`, or `failed` for `expected_status`.
+- record `expected_item_qty` as the printed quantity and
+  `expected_item_price` as that item's tax-inclusive integer line total, not its
+  unit price and not a value to multiply by quantity again;
+- record a separately printed discount as its own item row with quantity `1` and
+  a negative tax-inclusive line total.
 
 For a case that has not been verified by a person, use exactly one row with
 `human_verified` set to `false` and leave every expected field empty. AI output
@@ -84,7 +89,8 @@ aggregate comparison counts and rates.
 
 ## Report contents
 
-The report contains case IDs and safe aggregate or outcome metadata:
+Successful stdout and `RUN_ID/evaluation-report.json` retain schema version `1`
+unchanged. The report contains case IDs and safe aggregate or outcome metadata:
 
 - target count and processing success rate;
 - schema success rate;
@@ -96,4 +102,56 @@ The report contains case IDs and safe aggregate or outcome metadata:
 - aggregate human-ground-truth accuracy when available.
 
 It never contains images, source filenames or paths, store or item text, amounts,
-raw Ollama responses, hashes, EXIF, or receipt database identifiers.
+raw Ollama responses, receipt or image hashes, EXIF, or receipt database
+identifiers.
+
+Every run also writes the aggregate-only
+`RUN_ID/quality-baseline-report.json` sidecar. Its report schema version is `1`
+and its metric version is `quality-v1`. For each model the sidecar contains:
+
+- model, prompt, and extraction-schema provenance;
+- the existing aggregate summary and aggregate human-ground-truth accuracy;
+- target and human-verified counts;
+- aggregate NFR-Q1 through Q5 counts, rates, fixed thresholds, and assessments;
+- metric version.
+
+The sidecar does not contain case IDs or any per-case entry. Prompt and schema
+provenance hashes cover repository-owned extraction contracts only and never
+include private inputs, ground truth, model output, or an evaluation database.
+The stdout contract is not extended with the sidecar. Without human-verified
+ground truth, Q1 through Q4 rates are `null`; Q5 can still have an observed rate
+over all target cases. All assessments remain `unknown` while the golden set is
+incomplete.
+
+## Quality baseline
+
+`quality-v1` uses only `human_verified=true` cases for Q1 through Q4. Processing
+or schema failures for those cases count as mismatches instead of disappearing
+from the denominator. Q5 remains an operational rate over every target case.
+
+- Q1 is exact total matches divided by verified cases.
+- Q2 requires both normalized store matches and exact normalized-date matches.
+- Q3 aligns exact `(raw item name, quantity, tax-inclusive line price)` tuples
+  with a sequence-preserving LCS. Its denominator is the sum of
+  `max(expected item count, actual item count)` for each verified case.
+- Q4 is confirmed results with an incorrect total divided by confirmed results
+  among verified cases. A zero confirmed denominator is `unknown`, not zero.
+- Q5 is review results divided by all target cases.
+
+Store comparison normalization is deliberately conservative: Unicode NFKC,
+Unicode case folding, then removal of Unicode whitespace. It does not infer
+aliases or semantic equivalence. Item names are not normalized: the raw item name,
+quantity, and tax-inclusive line price must all match exactly.
+
+Rates can be reported for an incomplete set, but Q1 through Q5 assessments remain
+`unknown` unless the same run has exactly 30 target cases and all 30 are human
+verified. The fixed `quality-v1` thresholds are:
+
+- Q1: at least 98%;
+- Q2 store and date: each at least 95%;
+- Q3: at least 80%;
+- Q4: at most 2%;
+- Q5: at most 30%.
+
+Changing a denominator, comparison rule, or threshold requires a new metric
+version. See `docs/adr/002-quality-baseline-metrics.md`.

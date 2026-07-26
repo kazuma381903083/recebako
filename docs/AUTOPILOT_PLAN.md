@@ -64,11 +64,11 @@ human-verifiedな正解がない場合は達成済みとしない。
 | NFR-P1 1枚60秒、VLM30秒 | `requires_user_decision` | 「撮影→DB」「Pixel→report」「Mac側処理」という測定境界が仕様内で一致せず、安全な計測値もない | G49、G06、G43 |
 | NFR-P2 50枚30分 | `partially_implemented` | 逐次batch処理は可能 | G43の50件benchmark |
 | NFR-P3 常駐7GB以下、idle unload | `not_implemented` | lifecycle制御と測定なし | G44、G52 |
-| NFR-Q1 合計98%以上 | `requires_user_decision` | human verified truthなし | G09、G42 |
-| NFR-Q2 店名・日付95%以上 | `requires_user_decision` | human verified truthなし | G09、G42 |
-| NFR-Q3 品目80%以上 | `requires_user_decision` | human verified truthなし | G09、G42 |
-| NFR-Q4 誤確定2%以下 | `requires_user_decision` | verified totalなし | G09、G42 |
-| NFR-Q5 review率30%以下 | `not_implemented` | Phase 2 reportでrun単位の集計は可能だが、private sampleはreview率100%で継続baselineもない | G42 |
+| NFR-Q1 合計98%以上 | `partially_implemented` | `quality-v1`でhuman verifiedのみを分母に測定 | 30件すべての人手確認後に目標判定 |
+| NFR-Q2 店名・日付95%以上 | `partially_implemented` | versionedな店名正規化と日付完全一致を測定 | 30件すべての人手確認後に目標判定 |
+| NFR-Q3 品目80%以上 | `partially_implemented` | 品目tupleの順序保持LCSで測定 | 30件すべての人手確認後に目標判定 |
+| NFR-Q4 誤確定2%以下 | `partially_implemented` | verified内のactual confirmedを分母に測定し、0分母をunknown化 | 30件すべての人手確認後に目標判定 |
+| NFR-Q5 review率30%以下 | `partially_implemented` | 全target caseを分母に継続測定 | 30件すべての人手確認後に目標判定 |
 | NFR-S1 外部送信なし | `partially_implemented` | Ollama URL固定、`trust_env=False`、実行経路はlocalhostのみ | G37、G47 |
 | NFR-S2 Google Photos除外 | `requires_user_decision` | Pixel側の物理設定 | G37 |
 | NFR-S3 ログ衛生 | `partially_implemented` | inbox/failedは内容を出さず、CLI機能出力と分離 | G06の安全なtiming telemetryと運用時redirect方針 |
@@ -83,8 +83,8 @@ human-verifiedな正解がない場合は達成済みとしない。
 
 | 要求 | 状態 | 現在の根拠 | 残作業 |
 |---|---|---|---|
-| §9-1 30件golden setと人間入力CSV | `requires_user_decision` | private原本はあるが正解をCodexが確定してはならない | G09。10/5/5/5/5の業態内訳、劣化状態、撮影条件を人間が選定 |
-| §9-2 Q1〜Q3精度試験 | `requires_user_decision` | human verified truthに依存 | G42 |
+| §9-1 30件golden setと人間入力CSV | `partially_implemented` | 30 caseのprivate CSVがあり22 caseを人間確認済み | 残る8 caseの人手確認と業態・撮影条件の人手確認 |
+| §9-2 Q1〜Q3精度試験 | `partially_implemented` | Issue #42でversioned baselineを実装・測定 | 30/30 verifiedで再実行 |
 | 壊れた画像、白紙、ぼけ、非レシートをconfirmedにしない | `partially_implemented` | 空・破損・構造不正のunit testあり | G03、G45 |
 | 同一画像・再撮影の重複review | `partially_implemented` | identity/pHash unitと同一入力integrationあり | G59のprivate再撮影E2E |
 | Pixel撮影からレポートまで60秒 | `requires_user_decision` | Pixel、watcher、report、timingが未実装で、仕様内の終点もDB/reportで一致しない | G49、G33、G36、G37、G43 |
@@ -106,7 +106,7 @@ GitHub Issueは
 [`kazuma381903083/recebako#1`〜`#62`](https://github.com/kazuma381903083/recebako/issues)
 として作成済みであり、この表の `Gnn` は同じ番号の `#nn` に対応する。
 
-| Key | 優先度 | 目的 | 依存 | 初期状態 |
+| Key | 優先度 | 目的 | 依存 | 現在状態 |
 |---|---:|---|---|---|
 | G01 | P0 | 費目粒度とstore照合規則のADR | なし | blocked: user decision |
 | G02 | P0 | 重複除外の永続状態と集計規則のADR | なし | blocked: user decision |
@@ -116,7 +116,7 @@ GitHub Issueは
 | G06 | P1 | 機微情報を含まない段階別処理時間計測 | G49 | blocked: G49 |
 | G07 | P1 | raw品目名とname_normの分離 | なし | waiting |
 | G08 | P2 | Takeoutローカルフォルダ安全投入 | なし | waiting |
-| G09 | P0 | 30件human-verified正解CSV | G58 | blocked: human entry |
+| G09 | P0 | 30件human-verified正解CSV | G58 | partially implemented: 22/30 human verified |
 | G10 | P1 | 依存数・脆弱性・license・model provenance監査 | なし | waiting |
 | G11 | P0 | localhost review server shell | なし | waiting |
 | G12 | P1 | review一覧read-only API | G11 | waiting |
@@ -149,7 +149,7 @@ GitHub Issueは
 | G39 | P2 | CSV export CLI | G18、G25、G38 | blocked: G38 |
 | G40 | P1 | local backup/restore方式ADR | なし | blocked: user decision |
 | G41 | P2 | local-only OS backup設定とrestore検証 | G40 | blocked: G40/manual |
-| G42 | P1 | Q1〜Q5判定と回帰baseline | G09、G58 | blocked: G09 |
+| G42 | P1 | Q1〜Q5判定と回帰baseline | G09、G58 | partially implemented: `quality-v1`実装・22/30 baseline測定済み、30/30 private受入待ち |
 | G43 | P1 | 1件・50件性能benchmark | G06、G49、G58 | blocked: G49 |
 | G44 | P1 | VLM常駐memory測定 | G43 | blocked: local measurement |
 | G45 | P1 | degraded/nonreceipt安全受入suite | G03、G04、G58 | waiting |
@@ -165,7 +165,7 @@ GitHub Issueは
 | G55 | P0 | 撮影年月とfallback規則のADR | なし | blocked: user decision |
 | G56 | P1 | 撮影年月によるarchive配置 | G55 | blocked: G55 |
 | G57 | P1 | legacy image_path棚卸しと非破壊移行方針 | なし | blocked: existing data audit |
-| G58 | P0 | Git管理外private評価ハーネス | なし | implemented: PR待ち |
+| G58 | P0 | Git管理外private評価ハーネス | なし | implemented: PR #63でmainへmerge済み |
 | G59 | P1 | 再撮影版の重複private受入試験 | G58 | blocked: private capture |
 | G60 | P1 | 評価結果に基づくprompt・検証閾値調整判断 | G09、G42 | blocked: verified metrics |
 | G61 | P2 | Qwen3-VL 4B fallback比較と採否判断 | G42、G43 | blocked: verified metrics |
@@ -173,9 +173,11 @@ GitHub Issueは
 
 ## 7. 今回の実装境界
 
-今回実装するのは Phase 1Cの確定、自走基盤、およびPhase 2 private評価ハーネスまで。
-品目名正規化、費目分類、レビューUI、検索、月次レポート、watcher、launchd、
-macOS通知、Pixel連携、CSV export、backup運用、v1.0 releaseはIssue化だけを行う。
+Issue #42では既存のstdoutと評価report schema version 1を維持したまま、
+aggregate-only sidecarへversionedなQ1〜Q5指標、目標判定、provenanceを追加し、
+同一条件の回帰baselineを記録する。prompt、検証閾値、モデル既定値、品目名の
+業務正規化、費目分類、レビューUI、検索、月次レポート、watcher、launchd、
+macOS通知、Pixel連携、CSV export、backup運用は変更しない。
 
 正解データがない段階のconfirmed率は精度ではない。human verifiedな正解が未入力なら、
 評価結果は必ず「精度不明」と表現する。

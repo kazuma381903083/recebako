@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -17,8 +18,9 @@ from enum import Enum
 from pathlib import Path
 
 from recebako.ai import OllamaError
+from recebako.ai.ollama import EXTRACTION_PROMPT
 from recebako.config import AppConfig, DataConfig
-from recebako.domain import IngestMode
+from recebako.domain import IngestMode, ReceiptExtraction
 from recebako.evaluation.dataset import EvaluationCase, discover_cases
 from recebako.evaluation.models import (
     AccuracyMetric,
@@ -33,8 +35,22 @@ from recebako.evaluation.models import (
     EvaluationStatus,
     ModelEvaluationReport,
     ModelEvaluationSummary,
+    QualityAssessment,
+    QualityAssessmentStatus,
+    QualityBaselineReport,
+    QualityBaselineSummary,
+    QualityModelReport,
+    QualityProvenance,
+    QualityRateMetric,
+    QualityThresholds,
+    QualityUnknownReason,
     SchemaOutcome,
     TaxOutcome,
+)
+from recebako.evaluation.quality import (
+    REQUIRED_VERIFIED_CASE_COUNT,
+    _QualityAccumulator,
+    _QualityCounts,
 )
 from recebako.evaluation.truth import (
     GroundTruthCase,
@@ -62,6 +78,7 @@ DEFAULT_EVALUATION_MODELS = ("qwen3-vl:8b", "qwen3.5:9b")
 _RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
 _REPORT_FILENAME = "evaluation-report.json"
+_QUALITY_REPORT_FILENAME = "quality-baseline-report.json"
 
 
 class EvaluationRunErrorCode(str, Enum):
@@ -369,6 +386,12 @@ class _AccuracyAccumulator:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _ModelEvaluationArtifacts:
+    report: ModelEvaluationReport
+    quality: QualityBaselineSummary
+
+
 def run_evaluation(
     source_root: Path,
     *,
@@ -406,7 +429,7 @@ def run_evaluation(
             error_code=EvaluationRunErrorCode.RUNTIME_UNAVAILABLE,
         )
         with closing(run_root):
-            model_reports = tuple(
+            model_artifacts = tuple(
                 _run_model(
                     cases,
                     model_name=model_name,
@@ -423,9 +446,22 @@ def run_evaluation(
             run_root.assert_current()
             report = EvaluationReport(
                 run_id=run_id,
-                models=model_reports,
+                models=tuple(artifacts.report for artifacts in model_artifacts),
+            )
+            quality_report = QualityBaselineReport(
+                run_id=run_id,
+                models=tuple(
+                    QualityModelReport(
+                        provenance=_quality_provenance(artifacts.report.model_name),
+                        summary=artifacts.report.summary,
+                        accuracy=artifacts.report.accuracy,
+                        quality=artifacts.quality,
+                    )
+                    for artifacts in model_artifacts
+                ),
             )
             _write_report(report, run_root)
+            _write_quality_report(quality_report, run_root)
             run_root.assert_current()
             return report
 
@@ -441,7 +477,7 @@ def _run_model(
     reference_date: date,
     truth: GroundTruthDataset | None,
     clock: Callable[[], float],
-) -> ModelEvaluationReport:
+) -> _ModelEvaluationArtifacts:
     run_root.assert_current()
     model_root = _create_pinned_directory(
         run_root,
@@ -498,6 +534,7 @@ def _run_model(
         with closing(inputs):
             case_results: list[CaseEvaluationResult] = []
             accuracy = _AccuracyAccumulator()
+            quality = _QualityAccumulator()
             for case in cases:
                 start = clock()
                 process_result: ProcessResult | None = None
@@ -588,15 +625,24 @@ def _run_model(
                         process_result,
                         stored_items,
                     )
+                    quality.observe(
+                        truth_case,
+                        process_result,
+                        stored_items,
+                    )
 
             model_root.assert_current()
             inputs.assert_current()
             _chmod_regular_child(model_root, "ledger.db", 0o600)
-            return ModelEvaluationReport(
-                model_name=model_name,
-                cases=tuple(case_results),
-                summary=_summarize(case_results),
-                accuracy=accuracy.summary(),
+            summary = _summarize(case_results)
+            return _ModelEvaluationArtifacts(
+                report=ModelEvaluationReport(
+                    model_name=model_name,
+                    cases=tuple(case_results),
+                    summary=summary,
+                    accuracy=accuracy.summary(),
+                ),
+                quality=_quality_baseline(quality.counts, summary),
             )
 
 
@@ -609,6 +655,168 @@ def _stored_items(data_root: Path, receipt_id: int) -> Sequence[StoredItem]:
     if stored is None:
         raise EvaluationRunError(EvaluationRunErrorCode.STORED_RESULT_MISSING)
     return stored.items
+
+
+def _quality_provenance(model_name: str) -> QualityProvenance:
+    schema_json = json.dumps(
+        ReceiptExtraction.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return QualityProvenance(
+        model_name=model_name,
+        prompt_sha256=hashlib.sha256(EXTRACTION_PROMPT.encode("utf-8")).hexdigest(),
+        extraction_schema_sha256=hashlib.sha256(
+            schema_json.encode("utf-8")
+        ).hexdigest(),
+    )
+
+
+def _quality_rate(numerator: int, denominator: int) -> QualityRateMetric:
+    return QualityRateMetric(
+        denominator_count=denominator,
+        numerator_count=numerator,
+        rate=None if denominator == 0 else numerator / denominator,
+    )
+
+
+def _unknown_quality_assessment(
+    reason: QualityUnknownReason,
+) -> QualityAssessment:
+    return QualityAssessment(
+        status=QualityAssessmentStatus.UNKNOWN,
+        reason=reason,
+    )
+
+
+def _minimum_quality_assessment(
+    metric: QualityRateMetric,
+    threshold: float,
+) -> QualityAssessment:
+    if metric.rate is None:
+        return _unknown_quality_assessment(QualityUnknownReason.ZERO_DENOMINATOR)
+    return QualityAssessment(
+        status=(
+            QualityAssessmentStatus.MET
+            if metric.rate >= threshold
+            else QualityAssessmentStatus.NOT_MET
+        )
+    )
+
+
+def _maximum_quality_assessment(
+    metric: QualityRateMetric,
+    threshold: float,
+) -> QualityAssessment:
+    if metric.rate is None:
+        return _unknown_quality_assessment(QualityUnknownReason.ZERO_DENOMINATOR)
+    return QualityAssessment(
+        status=(
+            QualityAssessmentStatus.MET
+            if metric.rate <= threshold
+            else QualityAssessmentStatus.NOT_MET
+        )
+    )
+
+
+def _quality_baseline(
+    counts: _QualityCounts,
+    summary: ModelEvaluationSummary,
+) -> QualityBaselineSummary:
+    total_accuracy = _quality_rate(
+        counts.total_correct_count,
+        counts.verified_case_count,
+    )
+    store_accuracy = _quality_rate(
+        counts.store_correct_count,
+        counts.verified_case_count,
+    )
+    date_accuracy = _quality_rate(
+        counts.date_correct_count,
+        counts.verified_case_count,
+    )
+    item_accuracy = _quality_rate(
+        counts.item_correct_count,
+        counts.item_comparable_count,
+    )
+    false_confirmation_rate = _quality_rate(
+        counts.false_confirmed_count,
+        counts.confirmed_count,
+    )
+    review_rate = _quality_rate(
+        summary.status_counts.get(EvaluationStatus.REVIEW, 0),
+        summary.case_count,
+    )
+    thresholds = QualityThresholds()
+    golden_set_complete = (
+        summary.case_count == REQUIRED_VERIFIED_CASE_COUNT
+        and counts.verified_case_count == REQUIRED_VERIFIED_CASE_COUNT
+    )
+    if not golden_set_complete:
+        incomplete = _unknown_quality_assessment(
+            QualityUnknownReason.INCOMPLETE_GOLDEN_SET
+        )
+        assessments = (incomplete,) * 5
+    else:
+        q2_store = _minimum_quality_assessment(
+            store_accuracy,
+            thresholds.q2_store_minimum,
+        )
+        q2_date = _minimum_quality_assessment(
+            date_accuracy,
+            thresholds.q2_date_minimum,
+        )
+        if (
+            q2_store.status is QualityAssessmentStatus.UNKNOWN
+            or q2_date.status is QualityAssessmentStatus.UNKNOWN
+        ):
+            q2 = _unknown_quality_assessment(QualityUnknownReason.ZERO_DENOMINATOR)
+        else:
+            q2 = QualityAssessment(
+                status=(
+                    QualityAssessmentStatus.MET
+                    if q2_store.status is QualityAssessmentStatus.MET
+                    and q2_date.status is QualityAssessmentStatus.MET
+                    else QualityAssessmentStatus.NOT_MET
+                )
+            )
+        assessments = (
+            _minimum_quality_assessment(
+                total_accuracy,
+                thresholds.q1_total_minimum,
+            ),
+            q2,
+            _minimum_quality_assessment(
+                item_accuracy,
+                thresholds.q3_items_minimum,
+            ),
+            _maximum_quality_assessment(
+                false_confirmation_rate,
+                thresholds.q4_false_confirmation_maximum,
+            ),
+            _maximum_quality_assessment(
+                review_rate,
+                thresholds.q5_review_maximum,
+            ),
+        )
+    return QualityBaselineSummary(
+        target_case_count=summary.case_count,
+        verified_case_count=counts.verified_case_count,
+        golden_set_complete=golden_set_complete,
+        total_accuracy=total_accuracy,
+        store_accuracy=store_accuracy,
+        date_accuracy=date_accuracy,
+        item_accuracy=item_accuracy,
+        false_confirmation_rate=false_confirmation_rate,
+        review_rate=review_rate,
+        thresholds=thresholds,
+        q1_total=assessments[0],
+        q2_store_and_date=assessments[1],
+        q3_items=assessments[2],
+        q4_false_confirmation=assessments[3],
+        q5_review=assessments[4],
+    )
 
 
 def _summarize(
@@ -910,8 +1118,36 @@ def _write_report(
     report: EvaluationReport,
     run_root: _PinnedDirectory,
 ) -> None:
-    temporary_name = f".evaluation-report-{uuid.uuid4().hex}.tmp"
+    _write_json_report(
+        report,
+        run_root,
+        filename=_REPORT_FILENAME,
+        temporary_stem="evaluation-report",
+    )
+
+
+def _write_quality_report(
+    report: QualityBaselineReport,
+    run_root: _PinnedDirectory,
+) -> None:
+    _write_json_report(
+        report,
+        run_root,
+        filename=_QUALITY_REPORT_FILENAME,
+        temporary_stem="quality-baseline-report",
+    )
+
+
+def _write_json_report(
+    report: EvaluationReport | QualityBaselineReport,
+    run_root: _PinnedDirectory,
+    *,
+    filename: str,
+    temporary_stem: str,
+) -> None:
+    temporary_name = f".{temporary_stem}-{uuid.uuid4().hex}.tmp"
     descriptor = -1
+    temporary_created = False
     linked = False
     try:
         run_root.assert_current()
@@ -924,6 +1160,7 @@ def _write_report(
             0o600,
             dir_fd=run_root.descriptor,
         )
+        temporary_created = True
         with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as stream:
             descriptor = -1
             json.dump(
@@ -939,7 +1176,7 @@ def _write_report(
             os.fchmod(stream.fileno(), 0o600)
         os.link(
             temporary_name,
-            _REPORT_FILENAME,
+            filename,
             src_dir_fd=run_root.descriptor,
             dst_dir_fd=run_root.descriptor,
             follow_symlinks=False,
@@ -953,13 +1190,14 @@ def _write_report(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        try:
-            os.unlink(
-                temporary_name,
-                dir_fd=run_root.descriptor,
-            )
-        except FileNotFoundError:
-            pass
-        except OSError:
-            if not linked:
+        if temporary_created:
+            try:
+                os.unlink(
+                    temporary_name,
+                    dir_fd=run_root.descriptor,
+                )
+            except FileNotFoundError:
                 pass
+            except OSError:
+                if not linked:
+                    pass
