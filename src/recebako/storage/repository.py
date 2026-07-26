@@ -157,7 +157,7 @@ class ReceiptRepository:
                         (
                             receipt_id,
                             item.name,
-                            None,
+                            item.name_norm,
                             item.qty,
                             item.price,
                             None,

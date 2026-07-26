@@ -709,6 +709,46 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
     assert image_paths[1][0].startswith("review/")
 
 
+def test_process_preserves_distinct_raw_and_normalized_item_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image_path = tmp_path / "synthetic-name.png"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    raw_name = "SYNTHETIC-RAW-ＮＡＭＥ"
+    normalized_name = "synthetic-normalized-name-e\u0301"
+    payload = json.loads(_ollama_payload(receipt_date=_today().isoformat()))
+    payload["items"][0]["name"] = raw_name
+    payload["items"][0]["name_norm"] = normalized_name
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, *, config: json.dumps(payload, ensure_ascii=False),
+    )
+
+    exit_code = cli.run(["process", str(image_path)])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["status"] == "confirmed"
+    assert captured.err == ""
+    for forbidden in (raw_name, normalized_name):
+        assert forbidden not in captured.out
+        assert forbidden not in captured.err
+
+    with sqlite3.connect(data_root / "ledger.db") as connection:
+        stored_names = connection.execute(
+            "SELECT name, name_norm FROM items"
+        ).fetchone()
+
+    assert stored_names == (raw_name, normalized_name)
+
+
 def test_process_final_move_failure_stays_pending_and_is_recoverable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from dataclasses import replace
@@ -24,6 +25,9 @@ from recebako.storage import (
     connect_database,
     database_path,
 )
+
+RAW_SYNTHETIC_UNICODE_NAME = "RAW-SYNTH-\u30ab\u3099"
+NORMALIZED_SYNTHETIC_UNICODE_NAME = "NORM-SYNTH-ガ"
 
 
 @pytest.fixture
@@ -84,6 +88,19 @@ def _extraction() -> NormalizedReceiptExtraction:
     )
 
 
+def _name_contract_extraction(
+    *,
+    first_name_norm: str | None = NORMALIZED_SYNTHETIC_UNICODE_NAME,
+    second_name_norm: str | None = None,
+) -> NormalizedReceiptExtraction:
+    data = _extraction().model_dump(mode="python")
+    data["items"][0]["name"] = RAW_SYNTHETIC_UNICODE_NAME
+    data["items"][0]["name_norm"] = first_name_norm
+    data["items"][1]["name"] = "RAW-SYNTH-NULL"
+    data["items"][1]["name_norm"] = second_name_norm
+    return NormalizedReceiptExtraction.model_validate(data)
+
+
 def _write(tmp_path: Path) -> ReceiptWrite:
     return ReceiptWrite(
         extraction=_extraction(),
@@ -119,6 +136,11 @@ def test_initial_migration_creates_required_tables(tmp_path: Path) -> None:
             for row in connection.execute("PRAGMA table_info(receipts)")
             if row["name"] == "file_state"
         )
+        name_norm_column = next(
+            row
+            for row in connection.execute("PRAGMA table_info(items)")
+            if row["name"] == "name_norm"
+        )
     finally:
         connection.close()
 
@@ -133,6 +155,8 @@ def test_initial_migration_creates_required_tables(tmp_path: Path) -> None:
     } <= tables
     assert file_state_column["notnull"] == 1
     assert file_state_column["dflt_value"] == "'finalized'"
+    assert name_norm_column["type"] == "TEXT"
+    assert name_norm_column["notnull"] == 0
 
 
 def test_migration_can_be_applied_repeatedly(
@@ -246,6 +270,98 @@ def test_repository_saves_and_reads_receipt_and_items(
     ]
     assert [item.tax_adjustment for item in stored.items] == [11, 0]
     assert [breakdown.tax_amount for breakdown in stored.tax_breakdowns] == [11, 51]
+
+
+def test_repository_round_trip_keeps_raw_and_normalized_names_independent(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extraction = _name_contract_extraction()
+    extraction_snapshot = extraction.model_dump(mode="json")
+    raw_payload = {
+        "items": [
+            {
+                "name": RAW_SYNTHETIC_UNICODE_NAME,
+                "name_norm": NORMALIZED_SYNTHETIC_UNICODE_NAME,
+            },
+            {
+                "name": "RAW-SYNTH-NULL",
+            },
+        ]
+    }
+    record = replace(
+        _write(tmp_path),
+        extraction=extraction,
+        raw_payload=json.dumps(raw_payload, ensure_ascii=False),
+    )
+    repository = ReceiptRepository(connection)
+
+    receipt_id = repository.save(record)
+    stored = repository.get(receipt_id)
+    rows = connection.execute(
+        """
+        SELECT name, name_norm
+        FROM items
+        WHERE receipt_id = ?
+        ORDER BY id
+        """,
+        (receipt_id,),
+    ).fetchall()
+
+    assert stored is not None
+    assert extraction.model_dump(mode="json") == extraction_snapshot
+    assert [(row["name"], row["name_norm"]) for row in rows] == [
+        (RAW_SYNTHETIC_UNICODE_NAME, NORMALIZED_SYNTHETIC_UNICODE_NAME),
+        ("RAW-SYNTH-NULL", None),
+    ]
+    assert [(item.name, item.name_norm) for item in stored.items] == [
+        (RAW_SYNTHETIC_UNICODE_NAME, NORMALIZED_SYNTHETIC_UNICODE_NAME),
+        ("RAW-SYNTH-NULL", None),
+    ]
+    assert stored.raw_payload == raw_payload
+
+
+def test_existing_null_name_norm_remains_null_without_a_new_migration(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    extraction = _name_contract_extraction(
+        first_name_norm=None,
+        second_name_norm=None,
+    )
+    repository = ReceiptRepository(connection)
+    receipt_id = repository.save(replace(_write(tmp_path), extraction=extraction))
+
+    apply_migrations(connection)
+
+    rows = connection.execute(
+        """
+        SELECT name, name_norm
+        FROM items
+        WHERE receipt_id = ?
+        ORDER BY id
+        """,
+        (receipt_id,),
+    ).fetchall()
+    versions = connection.execute(
+        "SELECT version FROM schema_migrations ORDER BY version"
+    ).fetchall()
+    stored = repository.get(receipt_id)
+
+    assert [(row["name"], row["name_norm"]) for row in rows] == [
+        (RAW_SYNTHETIC_UNICODE_NAME, None),
+        ("RAW-SYNTH-NULL", None),
+    ]
+    assert [row["version"] for row in versions] == [
+        "001_initial",
+        "002_tax_normalization",
+        "003_receipt_file_state",
+    ]
+    assert stored is not None
+    assert [(item.name, item.name_norm) for item in stored.items] == [
+        (RAW_SYNTHETIC_UNICODE_NAME, None),
+        ("RAW-SYNTH-NULL", None),
+    ]
 
 
 def test_json_fields_are_saved_and_restored(
@@ -505,6 +621,46 @@ def test_item_failure_rolls_back_receipt(
     receipt_count = connection.execute("SELECT COUNT(*) FROM receipts").fetchone()
     assert receipt_count is not None
     assert receipt_count[0] == 0
+
+
+def test_name_norm_item_failure_rolls_back_the_entire_receipt_transaction(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    connection.executescript(
+        """
+        CREATE TRIGGER fail_non_null_name_norm
+        BEFORE INSERT ON items
+        WHEN NEW.name_norm IS NOT NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'forced synthetic name_norm failure');
+        END;
+        """
+    )
+    extraction = _name_contract_extraction(
+        first_name_norm=None,
+        second_name_norm="NORM-SYNTH-ROLLBACK",
+    )
+    record = replace(_write(tmp_path), extraction=extraction)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        ReceiptRepository(connection).save(record)
+
+    counts = {
+        table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in (
+            "receipts",
+            "items",
+            "item_tax_details",
+            "receipt_tax_breakdowns",
+        )
+    }
+    assert counts == {
+        "receipts": 0,
+        "items": 0,
+        "item_tax_details": 0,
+        "receipt_tax_breakdowns": 0,
+    }
 
 
 def test_item_tax_detail_failure_rolls_back_receipt(
