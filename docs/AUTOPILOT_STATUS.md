@@ -1,7 +1,7 @@
 # Recebako Autopilot Status
 
 更新日: 2026-07-26
-作業ブランチ: `issue/42-quality-baseline`
+作業ブランチ: `docs/42-baseline-acceptance`
 
 ## Phase 1C
 
@@ -22,7 +22,8 @@
 - G01〜G62をGitHub Issue `#1`〜`#62`として作成済み
 - 各Issueへ優先度、依存関係、受入条件、private E2E要否、security境界、waiting／blocked理由を記録済み
 - Pull Request [#63](https://github.com/kazuma381903083/recebako/pull/63)はmainへmerge済み
-- Issue #42の起点mainはPR #63のmerge commit `8d6f9ee`
+- Pull Request [#64](https://github.com/kazuma381903083/recebako/pull/64)はmainへmerge済み
+- Issue #42はユーザーが22/30 verifiedの現行baselineを受け入れたためclose済み
 
 ## Phase 2 private evaluation
 
@@ -43,7 +44,7 @@
 ## Phase 2 quality baseline
 
 - 状態: `quality-v1`定義、aggregate-only sidecar実装、22/30 verifiedのbaseline
-  測定と文書化を実施。Issue #42の30/30 private受入は未完了
+  測定と文書化を完了。Pull Request #64をmergeし、Issue #42をclose済み
 - 対象Issue: `#42`
 - 評価条件: historical mode、reference date固定、temperature 0、同一入力順、
   model別DB
@@ -65,13 +66,13 @@
   いない
 - private境界: 評価source不変、model別DB分離、通常利用DB非変更、Git記録は
   aggregate値だけ
-- 22/30 private E2Eでsidecar型、legacy集計一致、provenance、0600権限、
-  private allowlist境界を確認済み
+- 30 target（22 human verified）のprivate E2Eでsidecar型、legacy集計一致、
+  provenance、0600権限、private allowlist境界を確認済み
+- 残る8件は現行baselineの完了条件に含めない。追加入力が必要になってもAI出力から
+  ground truthを生成・変更しない
 
 ## Remaining
 
-1. 残る8件のground truthを人間が確認し、30/30 verifiedでQ1〜Q5を再判定して
-   Issue #42のprivate受入を完了する
-2. 品質改善は完全なbaseline取得後にIssue #60の範囲で判断し、Issue #42では
-   model既定値を変更しない
-3. Phase 3以降はIssueの依存関係・優先順位に従うwaiting／blocked状態を維持する
+1. 22/30 baselineを現状の評価として維持し、confirmed率をaccuracyと表現しない
+2. 追加のground truthが必要になった場合だけ、人間が入力して評価集合を明記する
+3. 次のIssueは依存関係と優先順位に従って進める

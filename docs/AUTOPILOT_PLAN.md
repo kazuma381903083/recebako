@@ -64,11 +64,11 @@ human-verifiedな正解がない場合は達成済みとしない。
 | NFR-P1 1枚60秒、VLM30秒 | `requires_user_decision` | 「撮影→DB」「Pixel→report」「Mac側処理」という測定境界が仕様内で一致せず、安全な計測値もない | G49、G06、G43 |
 | NFR-P2 50枚30分 | `partially_implemented` | 逐次batch処理は可能 | G43の50件benchmark |
 | NFR-P3 常駐7GB以下、idle unload | `not_implemented` | lifecycle制御と測定なし | G44、G52 |
-| NFR-Q1 合計98%以上 | `partially_implemented` | `quality-v1`でhuman verifiedのみを分母に測定 | 30件すべての人手確認後に目標判定 |
-| NFR-Q2 店名・日付95%以上 | `partially_implemented` | versionedな店名正規化と日付完全一致を測定 | 30件すべての人手確認後に目標判定 |
-| NFR-Q3 品目80%以上 | `partially_implemented` | 品目tupleの順序保持LCSで測定 | 30件すべての人手確認後に目標判定 |
-| NFR-Q4 誤確定2%以下 | `partially_implemented` | verified内のactual confirmedを分母に測定し、0分母をunknown化 | 30件すべての人手確認後に目標判定 |
-| NFR-Q5 review率30%以下 | `partially_implemented` | 全target caseを分母に継続測定 | 30件すべての人手確認後に目標判定 |
+| NFR-Q1 合計98%以上 | `partially_implemented` | `quality-v1`でhuman verifiedのみを分母に22/30件を測定 | incomplete golden setのため目標達成判定はunknown |
+| NFR-Q2 店名・日付95%以上 | `partially_implemented` | versionedな店名正規化と日付完全一致を22/30件で測定 | incomplete golden setのため目標達成判定はunknown |
+| NFR-Q3 品目80%以上 | `partially_implemented` | 品目tupleの順序保持LCSを22/30件で測定 | incomplete golden setのため目標達成判定はunknown |
+| NFR-Q4 誤確定2%以下 | `partially_implemented` | verified内のactual confirmedを分母に測定し、0分母をunknown化 | incomplete golden setのため目標達成判定はunknown |
+| NFR-Q5 review率30%以下 | `partially_implemented` | 全target caseを分母に継続測定 | incomplete golden setのため目標達成判定はunknown |
 | NFR-S1 外部送信なし | `partially_implemented` | Ollama URL固定、`trust_env=False`、実行経路はlocalhostのみ | G37、G47 |
 | NFR-S2 Google Photos除外 | `requires_user_decision` | Pixel側の物理設定 | G37 |
 | NFR-S3 ログ衛生 | `partially_implemented` | inbox/failedは内容を出さず、CLI機能出力と分離 | G06の安全なtiming telemetryと運用時redirect方針 |
@@ -83,8 +83,8 @@ human-verifiedな正解がない場合は達成済みとしない。
 
 | 要求 | 状態 | 現在の根拠 | 残作業 |
 |---|---|---|---|
-| §9-1 30件golden setと人間入力CSV | `partially_implemented` | 30 caseのprivate CSVがあり22 caseを人間確認済み | 残る8 caseの人手確認と業態・撮影条件の人手確認 |
-| §9-2 Q1〜Q3精度試験 | `partially_implemented` | Issue #42でversioned baselineを実装・測定 | 30/30 verifiedで再実行 |
+| §9-1 30件golden setと人間入力CSV | `partially_implemented` | 30 target caseのprivate CSVがあり22 caseを人間確認済み。この範囲をbaselineとしてユーザー受入済み | 必要になった場合だけ人間が追加入力（AI補完禁止） |
+| §9-2 Q1〜Q3精度試験 | `partially_implemented` | Issue #42で22 verified caseのversioned baselineを実装・測定し、Issueを完了 | incomplete golden setとして目標判定はunknownを維持 |
 | 壊れた画像、白紙、ぼけ、非レシートをconfirmedにしない | `partially_implemented` | 空・破損・構造不正のunit testあり | G03、G45 |
 | 同一画像・再撮影の重複review | `partially_implemented` | identity/pHash unitと同一入力integrationあり | G59のprivate再撮影E2E |
 | Pixel撮影からレポートまで60秒 | `requires_user_decision` | Pixel、watcher、report、timingが未実装で、仕様内の終点もDB/reportで一致しない | G49、G33、G36、G37、G43 |
@@ -149,7 +149,7 @@ GitHub Issueは
 | G39 | P2 | CSV export CLI | G18、G25、G38 | blocked: G38 |
 | G40 | P1 | local backup/restore方式ADR | なし | blocked: user decision |
 | G41 | P2 | local-only OS backup設定とrestore検証 | G40 | blocked: G40/manual |
-| G42 | P1 | Q1〜Q5判定と回帰baseline | G09、G58 | partially implemented: `quality-v1`実装・22/30 baseline測定済み、30/30 private受入待ち |
+| G42 | P1 | Q1〜Q5判定と回帰baseline | G09、G58 | implemented: `quality-v1`実装・22/30 baselineをユーザー受入済み、Issue closed |
 | G43 | P1 | 1件・50件性能benchmark | G06、G49、G58 | blocked: G49 |
 | G44 | P1 | VLM常駐memory測定 | G43 | blocked: local measurement |
 | G45 | P1 | degraded/nonreceipt安全受入suite | G03、G04、G58 | waiting |
@@ -179,5 +179,6 @@ aggregate-only sidecarへversionedなQ1〜Q5指標、目標判定、provenance�
 業務正規化、費目分類、レビューUI、検索、月次レポート、watcher、launchd、
 macOS通知、Pixel連携、CSV export、backup運用は変更しない。
 
-正解データがない段階のconfirmed率は精度ではない。human verifiedな正解が未入力なら、
-評価結果は必ず「精度不明」と表現する。
+confirmed率は精度ではない。現行baselineは22件のhuman verifiedな正解だけを
+accuracy分母に含め、残る8件を除外する。golden setが未完成のため、Q1〜Q5の
+assessmentは`unknown`を維持する。
