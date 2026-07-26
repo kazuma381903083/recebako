@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 PaymentMethod = Literal["cash", "credit", "qr", "emoney", "unknown"]
 
@@ -24,6 +33,11 @@ class ReceiptItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    name_norm: StrictStr | None = Field(
+        default=None,
+        description="原記載のnameとは独立した任意の正規化名",
+        exclude_if=lambda value: value is None,
+    )
     qty: int = 1
     price: int = Field(description="円・税込の行合計")
     price_raw: int | None = Field(
@@ -46,6 +60,25 @@ class ReceiptItem(BaseModel):
             value.setdefault("price_raw", None)
             value.setdefault("tax_rate", None)
             value.setdefault("tax_treatment", TaxTreatment.UNKNOWN)
+        return value
+
+    @field_validator("name_norm")
+    @classmethod
+    def _validate_name_norm(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            not value
+            or value != value.strip()
+            or any(
+                unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+                for character in value
+            )
+        ):
+            raise ValueError(
+                "name_normは前後空白、制御文字、不可視format文字、"
+                "surrogateを含まない非空文字列にしてください"
+            )
         return value
 
 

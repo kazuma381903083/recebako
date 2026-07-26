@@ -236,11 +236,12 @@ def test_extract_receipt_sends_schema_and_validates_response(tmp_path: Path) -> 
     assert payload["format"]["properties"]["is_receipt"]["type"] == "boolean"
     assert "is_receipt" in payload["format"]["required"]
     item_schema = payload["format"]["$defs"]["ReceiptItem"]["properties"]
-    assert {"price_raw", "tax_rate", "tax_treatment"} <= item_schema.keys()
+    assert {"name_norm", "price_raw", "tax_rate", "tax_treatment"} <= item_schema.keys()
     assert "tax_breakdowns" in payload["format"]["properties"]
     assert {"price_raw", "tax_rate", "tax_treatment"} <= set(
         payload["format"]["$defs"]["ReceiptItem"]["required"]
     )
+    assert "name_norm" not in payload["format"]["$defs"]["ReceiptItem"]["required"]
     assert "tax_breakdowns" in payload["format"]["required"]
     assert "items[].price_raw" in payload["messages"][0]["content"]
     assert "tax_breakdowns" in payload["messages"][0]["content"]

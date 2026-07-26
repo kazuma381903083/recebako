@@ -283,9 +283,11 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
       "items": {"type": "object",
         "required": ["name", "price"],
         "properties": {
-          "name":  {"type": "string"},
-          "qty":   {"type": "integer", "default": 1},
-          "price": {"type": "integer", "description": "円・税込の行合計"}}}
+          "name":      {"type": "string", "description": "レシート記載の生の品目名"},
+          "name_norm": {"type": ["string", "null"], "default": null,
+                        "description": "nameとは独立した任意の正規化名"},
+          "qty":       {"type": "integer", "default": 1},
+          "price":     {"type": "integer", "description": "円・税込の行合計"}}}
     },
     "subtotal":   {"type": "integer"},
     "tax":        {"type": "integer"},
@@ -294,6 +296,7 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
     "confidence": {"type": "number",  "description": "読み取り自信度 0.0-1.0"}
   }
 }</span></pre>
+  <p class="note"><code>items[].name</code>をcanonicalなraw品目名として原本どおり保持し、<code>name_norm</code>で上書きしない。<code>name_norm</code>は任意fieldで、未指定または<code>null</code>は未設定として後方互換に扱い、出力時は省略できる。空文字、前後空白、制御文字、不可視format文字、surrogate、文字列以外はschema-invalidとし、受理したUnicode文字列はこの検証・保存経路では変換しない。raw値からの推測補完、抽出promptによる正規化生成、分類、集計はそれぞれの後続工程で扱う。</p>
   <div class="beginner">「読めない項目は<strong>空文字や0で埋めさせる</strong>」のがコツ。無理に埋めさせると幻覚（それっぽい嘘）が混入する。<code>is_receipt=false</code>なら他項目を中立値にして即failedへ隔離する。<code>confidence</code>を自己申告させ、低いレシートは要確認行きにする。</div>
   <h3><span class="hn">5-2</span>SQLiteテーブル定義</h3>
 <pre><span class="k">CREATE TABLE</span> receipts (

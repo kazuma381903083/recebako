@@ -1,7 +1,7 @@
 # Recebako Autopilot Status
 
 更新日: 2026-07-26
-作業ブランチ: `issue/5-unified-ollama-config`
+作業ブランチ: `issue/7-item-name-normalization`
 
 ## Phase 1C
 
@@ -24,11 +24,14 @@
 - Pull Request [#63](https://github.com/kazuma381903083/recebako/pull/63)はmainへmerge済み
 - Pull Request [#64](https://github.com/kazuma381903083/recebako/pull/64)はmainへmerge済み
 - Issue #42はユーザーが22/30 verifiedの現行baselineを受け入れたためclose済み
-- Pull Request #65はIssue #42の受入記録、Pull Request #66はIssue #3の実装として
-  main向けに作成済み
-- Pull Request [#67](https://github.com/kazuma381903083/recebako/pull/67)はIssue #4の
-  実装としてmain向けに作成済み。Issue #5は#65、#66、#67の後続として独立commitにする
-- Issue #3〜#5の起点mainはPR #64のmerge commit `a59ebb5`
+- Pull Request [#65](https://github.com/kazuma381903083/recebako/pull/65)、
+  [#66](https://github.com/kazuma381903083/recebako/pull/66)、
+  [#67](https://github.com/kazuma381903083/recebako/pull/67)、
+  [#68](https://github.com/kazuma381903083/recebako/pull/68)は依存順にmainへmerge済み
+- Issue #7の作業ブランチは最新mainのmerge commit `c9fcd39`へfast-forward済み。
+  Issue #7だけを独立commitにし、自動mergeしない
+- Issue #11は仕様内のserver要否とloopback通信の位置付けが明確になるまでblocked。
+  試行した実装は保持・commitしておらず、Issue #7とは混在させない
 
 ## Phase 2 private evaluation
 
@@ -139,9 +142,31 @@
   prompt、検証閾値の変更なし
 - 自動検査: private-file scan、ruff、format、mypy、467 tests、diff checks成功
 
+## Phase 2 raw item name normalization contract
+
+- 状態: Issue #7のdomain validation、非破壊carry、repository round-trip、回帰test、
+  仕様更新を作業ブランチで実装
+- 対象Issue: `#7`
+- raw契約: 既存の`items.name`がcanonicalなraw品目名。`name_norm`の有無や内容で
+  上書き・変換せず、保存前後で同じ値を維持
+- normalized契約: `name_norm`は独立した任意field。欠落と`null`は未設定として
+  受理し、既存response・既存DB行との後方互換性を維持。未設定値はJSON出力で省略
+- validation: 空文字、前後空白、制御文字、不可視format文字、surrogate、文字列以外は
+  schema-invalidとして`confirmed`へ進めない。受理したUnicode文字列は変換せず保持
+- 保存: 税正規化を通してrawとnormalizedの両方を独立してcarryし、既存
+  `items.name_norm`列へtransaction内で保存・復元。既存NULL行を推測で補完しない
+- 互換性: 既存のraw品目名によるquality/accuracy照合、`name_norm`未設定・`null`の
+  CLI旧JSON形、`StoredItem`読取契約を維持。非null時は独立fieldとして出力する。
+  抽出schemaのprovenance hashだけはfield追加に伴い更新
+- 対象外: 抽出promptによる正規化名生成、カテゴリ分類、検索・集計・report、
+  review UI、model既定値・閾値変更、private精度評価
+- DB migration、新規依存、外部AI、privateデータ利用なし。prompt hashは変更しない
+- §6-4全体はLLM生成と集計・表示が未実装のため`partially_implemented`を維持
+- 自動検査: private-file scan、ruff、format、mypy、491 tests、diff checks成功
+
 ## Remaining
 
-1. Issue #5を独立commitとしてpushし、main向けPull Requestを作成する
-2. Pull Request #65、#66、#67、Issue #5の依存順を保ち、自動mergeせずreviewを待つ
-3. 次の未実装Issueへ進む。22/30 baselineは現状の評価として維持し、confirmed率を
-   accuracyと表現しない
+1. Issue #7を独立commitとしてpushしてmain向けPull Requestを作成する
+2. Issue #7のPull Requestは自動mergeせずreviewを待つ
+3. Issue #11は仕様のserver要否とloopback通信の扱いが明確になるまでblockedを維持
+4. 22/30 baselineは現状の評価として維持し、confirmed率をaccuracyと表現しない

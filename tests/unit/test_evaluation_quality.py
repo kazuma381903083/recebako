@@ -74,6 +74,7 @@ def _stored_item(
     item_id: int,
     name: str,
     *,
+    name_norm: str | None = None,
     qty: int = 1,
     price: int = 100,
     price_raw: int | None = None,
@@ -82,7 +83,7 @@ def _stored_item(
         id=item_id,
         receipt_id=1,
         name=name,
-        name_norm=None,
+        name_norm=name_norm,
         qty=qty,
         price=price,
         price_raw=price if price_raw is None else price_raw,
@@ -313,3 +314,29 @@ def test_item_alignment_does_not_normalize_raw_item_name() -> None:
     actual = (_stored_item(1, "a item", qty=1, price=100),)
 
     assert _item_alignment_counts(expected, actual) == (1, 0)
+
+
+def test_quality_v1_uses_raw_name_and_never_substitutes_name_norm() -> None:
+    expected_raw = (_truth_item(0, "RAW-SYNTH-MATCH", qty=1, price=100),)
+    raw_matches = (
+        _stored_item(
+            1,
+            "RAW-SYNTH-MATCH",
+            name_norm="NORM-SYNTH-DIFFERENT",
+            qty=1,
+            price=100,
+        ),
+    )
+    only_norm_matches = (
+        _stored_item(
+            2,
+            "RAW-SYNTH-DIFFERENT",
+            name_norm="RAW-SYNTH-MATCH",
+            qty=1,
+            price=100,
+        ),
+    )
+
+    assert QUALITY_METRIC_VERSION == "quality-v1"
+    assert _item_alignment_counts(expected_raw, raw_matches) == (1, 1)
+    assert _item_alignment_counts(expected_raw, only_norm_matches) == (1, 0)

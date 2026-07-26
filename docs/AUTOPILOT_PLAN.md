@@ -30,7 +30,7 @@ human-verifiedな正解がない場合は達成済みとしない。
 | §2-2 Pixel、Syncthing送信専用、Google Photos除外 | `requires_user_decision` | アプリは `inbox/` のみを消費しSyncthingへ直接依存しない | 物理端末の設定と手動確認 |
 | FR-01 画像自動検知、起動時一括処理 | `partially_implemented` | `recebako inbox run`、排他、順序、limit、自動回復を実装 | watcher、launchd |
 | FR-02 EXIF回転、長辺2048px、pHash | `implemented` | `imaging/preprocess.py` と `test_preprocess.py` | private撮影条件での受入確認のみ |
-| FR-03 定義済みJSONによる抽出 | `implemented` | Pydantic schemaをOllama `format` に指定、temperature=0、必須strict booleanの `is_receipt` を検証 | `name_norm` は別要求 |
+| FR-03 定義済みJSONによる抽出 | `implemented` | Pydantic schemaをOllama `format` に指定、temperature=0、必須strict booleanの `is_receipt` と任意の `name_norm` を検証 | `name_norm` の生成規則は§6-4の残要求 |
 | FR-04 合計、日付、重複、三値判定 | `implemented` | 検証、pHash/identity重複、confirmed/review/failed、最大3試行の決定的な画像variant再試行を実装 | private劣化条件の受入はG45 |
 | FR-05 費目分類と店名マスタ学習 | `not_implemented` | DB列と `store_master` テーブルのみ存在し保存値は未設定 | G01、G19、G23〜G25 |
 | FR-06 SQLite保存、原画像相対パス、撮影年月archive | `partially_implemented` | transaction、`file_state`、排他的移動、回復、実在相対パスをテスト。現在の年月は抽出日（不正時は実行日）で決まり撮影年月ではない | G55〜G57 |
@@ -43,15 +43,15 @@ human-verifiedな正解がない場合は達成済みとしない。
 
 | 要求 | 状態 | 現在の根拠 | 残作業 |
 |---|---|---|---|
-| §5-1 JSON Schema強制、必須値検証 | `implemented` | `domain/receipt.py`、`ai/ollama.py`、Ollama mock tests | なし |
+| §5-1 JSON Schema強制、必須値検証 | `implemented` | `domain/receipt.py`、`ai/ollama.py`、Ollama mock tests。raw `name` と任意の `name_norm` を独立検証 | なし |
 | §5-1、ADR-001 税情報、raw/normalized価格、安全な補正 | `implemented` | migration 002、`normalization/tax.py`、監査issue code | なし |
-| §5-2 receipts/items/store_master | `partially_implemented` | テーブルは存在 | category、name_norm、master挙動 |
+| §5-2 receipts/items/store_master | `partially_implemented` | テーブルが存在し、itemsのraw `name` と任意の `name_norm` を独立保存・復元 | category、master挙動 |
 | §5-3 inbox→processing→archive/review/failed | `implemented` | 排他的移動、pending/finalized、起動時回復、dry-run、非レシートの即時failed隔離、最大3試行失敗後のfailed遷移 | なし |
 | §6-1 推測禁止、負値、schema、temperature=0 | `implemented` | `ai/ollama.py` | なし |
 | §6-2 合計・日付・confidence・重複のreview判定 | `implemented` | `validation/receipt.py`、`storage/duplicates.py` | なし |
 | §6-2 回転・拡大を伴う最大3回再試行 | `implemented` | standard、時計回り90度、2倍拡大の順序、再試行・即時停止規則、一時variant cleanupを自動test | private劣化条件の受入はG45 |
 | §6-3 店名マスタ優先、未知店だけLLM、修正学習 | `not_implemented` | 実装なし | G01、G19、G23〜G25 |
-| §6-4 raw品目名と `name_norm` の分離 | `not_implemented` | DB列のみ、domain/promptに未追加 | G07 |
+| §6-4 raw品目名と `name_norm` の分離 | `partially_implemented` | G07でcanonical raw `name` を不変に保ち、任意の `name_norm` のvalidation・保存round-tripを実装 | LLMによる正規化生成とG27/G30の集計・表示 |
 | §6-4 confirmed限定のレポート集計 | `not_implemented` | query layerなし | G27 |
 | §11 `is_receipt=false` をfailedへ隔離 | `implemented` | 必須strict schema、分類prompt、正規化前のfailed短絡、DB/file回復test | なし |
 | 費目をreceipt単位かitem単位か | `requires_user_decision` | §6-3と§6-4の集計粒度が一意でない | G01でADR化 |
@@ -114,11 +114,11 @@ GitHub Issueは
 | G04 | P0 | 最大3回の抽出variant再試行 | G03推奨（hard dependencyではない） | implemented: 決定的な順序・停止条件・cleanupを自動test |
 | G05 | P1 | 全抽出CLIのmodel/endpoint設定統一 | なし | implemented: 中央validator、解決優先順位、loopback境界、全経路伝播を自動test |
 | G06 | P1 | 機微情報を含まない段階別処理時間計測 | G49 | blocked: G49 |
-| G07 | P1 | raw品目名とname_normの分離 | なし | waiting |
+| G07 | P1 | raw品目名とname_normの分離 | なし | implemented: optional fieldのvalidation・非破壊round-trip |
 | G08 | P2 | Takeoutローカルフォルダ安全投入 | なし | waiting |
 | G09 | P0 | 30件human-verified正解CSV | G58 | partially implemented: 22/30 human verified |
 | G10 | P1 | 依存数・脆弱性・license・model provenance監査 | なし | waiting |
-| G11 | P0 | localhost review server shell | なし | waiting |
+| G11 | P0 | localhost review server shell | なし | blocked: 仕様内のserver要否とloopback通信の明確化待ち |
 | G12 | P1 | review一覧read-only API | G11 | waiting |
 | G13 | P1 | receipt詳細read-only API | G11 | waiting |
 | G14 | P1 | 原画像の安全なlocalhost API | G11、G13 | waiting |
@@ -190,3 +190,16 @@ modelだけを既定pairまたは`--model`で差し替え、endpointとtemperatu
 production既定model、DB、抽出schema、外部AI、LiteLLM、model download、idle unload、
 性能benchmarkは変更しない。外向き通信の実環境受入はG37/G47、idle unloadはG52、
 性能測定はG43の範囲に残す。Issue #5のCIはmock通信だけを使用する。
+
+Issue #7では、既存の`items.name`をcanonicalなraw品目名として不変に維持し、
+任意の`name_norm`をdomain validation、税正規化時の非破壊carry、repository
+round-tripへ追加する。`name_norm`の欠落と`null`は既存response・既存DB行との
+互換性のため未設定として扱い、serializationでは省略する。空文字、前後空白、
+制御文字、不可視format文字、surrogate、文字列以外はschema-invalidとし、受理した
+Unicode文字列をこの経路で変換したり、raw `name`から推測補完したりしない。
+
+抽出promptによる`name_norm`生成、カテゴリ分類、検索、confirmed限定集計、TOP品目
+表示、review UIはIssue #7に含めない。このためG07のdomain/repository契約は
+implementedとしても、仕様§6-4全体はpartially implementedのまま後続Issueへ残す。
+既存DB列を使うためmigrationと新規依存は追加せず、品質評価は引き続きADR-002
+どおりraw品目tupleを使用する。privateデータを使った精度主張は行わない。

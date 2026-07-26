@@ -105,6 +105,185 @@ def test_payload_date_is_normalized_and_raw_value_is_retained() -> None:
     assert result.status is ReceiptStatus.CONFIRMED
 
 
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_legacy_item_without_name_norm_keeps_existing_serialization(
+    explicit_null: bool,
+) -> None:
+    payload = json.loads(
+        _receipt(
+            items=[
+                {
+                    "name": "RAW-SYNTH-LEGACY",
+                    "qty": 1,
+                    "price": 100,
+                }
+            ]
+        ).model_dump_json()
+    )
+    item_payload = payload["items"][0]
+    item_payload.pop("name_norm", None)
+    if explicit_null:
+        item_payload["name_norm"] = None
+
+    parsed = ReceiptExtraction.model_validate(payload)
+    receipt, result = validate_receipt_payload(
+        json.dumps(payload, ensure_ascii=False),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is not None
+    assert result.status is ReceiptStatus.CONFIRMED
+    assert parsed.items[0].name == "RAW-SYNTH-LEGACY"
+    assert parsed.items[0].name_norm is None
+    assert receipt.items[0].name == "RAW-SYNTH-LEGACY"
+    assert receipt.items[0].name_norm is None
+    assert "name_norm" not in parsed.items[0].model_dump(mode="json")
+    assert "name_norm" not in receipt.items[0].model_dump(mode="json")
+
+
+def test_tax_normalization_preserves_distinct_raw_and_unicode_name_norm() -> None:
+    raw_name = "RAW-SYNTH-\u30ab\u3099"
+    normalized_name = "NORM SYNTH-ガ"
+    raw_receipt = _receipt(
+        items=[
+            {
+                "name": raw_name,
+                "name_norm": normalized_name,
+                "qty": 1,
+                "price": 100,
+                "price_raw": 100,
+                "tax_rate": 8,
+                "tax_treatment": "excluded",
+            }
+        ],
+        tax_breakdowns=[
+            {
+                "tax_rate": 8,
+                "taxable_amount": 100,
+                "tax_amount": 8,
+                "tax_treatment": "excluded",
+            }
+        ],
+        total=108,
+    )
+    source_snapshot = raw_receipt.model_dump(mode="json")
+
+    receipt, result = validate_receipt_payload(
+        raw_receipt.model_dump_json(),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is not None
+    assert result.status is ReceiptStatus.CONFIRMED
+    assert raw_receipt.model_dump(mode="json") == source_snapshot
+    assert raw_receipt.items[0].name == raw_name
+    assert raw_receipt.items[0].name_norm == normalized_name
+    assert receipt.items[0].name == raw_name
+    assert receipt.items[0].name_norm == normalized_name
+    assert receipt.items[0].price_raw == 100
+    assert receipt.items[0].price == 108
+
+
+@pytest.mark.parametrize(
+    "name_norm",
+    [
+        "NORM\u3000SYNTH",
+        "NORM\u00a0SYNTH",
+    ],
+)
+def test_internal_unicode_spacing_is_preserved_without_normalization(
+    name_norm: str,
+) -> None:
+    raw_receipt = _receipt(
+        items=[
+            {
+                "name": "RAW-SYNTH-INTERNAL-SPACING",
+                "name_norm": name_norm,
+                "qty": 1,
+                "price": 100,
+            }
+        ]
+    )
+
+    receipt, result = validate_receipt_payload(
+        raw_receipt.model_dump_json(),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is not None
+    assert result.status is ReceiptStatus.CONFIRMED
+    assert receipt.items[0].name_norm == name_norm
+
+
+@pytest.mark.parametrize(
+    "invalid_name_norm",
+    [
+        "",
+        " \t\u3000",
+        " SYNTH-NORM",
+        "SYNTH-NORM ",
+        "\u3000SYNTH-NORM",
+        "SYNTH-NORM\u00a0",
+        "SYNTH\nNORM",
+        "SYNTH\u0000NORM",
+        "\u200b",
+        1,
+        True,
+        ["SYNTH-NORM"],
+        {"value": "SYNTH-NORM"},
+    ],
+)
+def test_invalid_name_norm_is_schema_invalid_and_never_confirmed(
+    invalid_name_norm: object,
+) -> None:
+    payload = json.loads(
+        _receipt(
+            items=[
+                {
+                    "name": "RAW-SYNTH-INVALID-NORM",
+                    "qty": 1,
+                    "price": 100,
+                }
+            ]
+        ).model_dump_json()
+    )
+    payload["items"][0]["name_norm"] = invalid_name_norm
+
+    receipt, result = validate_receipt_payload(
+        json.dumps(payload, ensure_ascii=False),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is None
+    assert result.status is ReceiptStatus.FAILED
+    assert {issue.code for issue in result.issues} == {"structure.invalid"}
+
+
+def test_name_norm_never_fills_a_missing_raw_name() -> None:
+    payload = json.loads(
+        _receipt(
+            items=[
+                {
+                    "name": "RAW-SYNTH-REQUIRED",
+                    "qty": 1,
+                    "price": 100,
+                }
+            ]
+        ).model_dump_json()
+    )
+    payload["items"][0].pop("name")
+    payload["items"][0]["name_norm"] = "NORM-SYNTH-MUST-NOT-REPLACE-RAW"
+
+    receipt, result = validate_receipt_payload(
+        json.dumps(payload, ensure_ascii=False),
+        reference_date=REFERENCE_DATE,
+    )
+
+    assert receipt is None
+    assert result.status is ReceiptStatus.FAILED
+    assert {issue.code for issue in result.issues} == {"structure.invalid"}
+
+
 def test_regular_mode_reviews_date_older_than_365_days() -> None:
     result = validate_receipt(
         _receipt(date="2020/1/1"),
