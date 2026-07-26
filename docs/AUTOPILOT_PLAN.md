@@ -69,14 +69,14 @@ human-verifiedな正解がない場合は達成済みとしない。
 | NFR-Q3 品目80%以上 | `partially_implemented` | 品目tupleの順序保持LCSを22/30件で測定 | incomplete golden setのため目標達成判定はunknown |
 | NFR-Q4 誤確定2%以下 | `partially_implemented` | verified内のactual confirmedを分母に測定し、0分母をunknown化 | incomplete golden setのため目標達成判定はunknown |
 | NFR-Q5 review率30%以下 | `partially_implemented` | 全target caseを分母に継続測定 | incomplete golden setのため目標達成判定はunknown |
-| NFR-S1 外部送信なし | `partially_implemented` | Ollama URL固定、`trust_env=False`、実行経路はlocalhostのみ | G37、G47 |
+| NFR-S1 外部送信なし | `partially_implemented` | Ollama設定をHTTP loopbackへ正規化し、remote endpointを拒否、環境proxyを無効化、redirectを非追従。全抽出経路で検証済み設定objectを使用 | G37、G47の運用・外向き通信受入 |
 | NFR-S2 Google Photos除外 | `requires_user_decision` | Pixel側の物理設定 | G37 |
 | NFR-S3 ログ衛生 | `partially_implemented` | inbox/failedは内容を出さず、CLI機能出力と分離 | G06の安全なtiming telemetryと運用時redirect方針 |
 | NFR-S4 FileVault、local backup | `requires_user_decision` | OS設定と方式が未確認 | G40、G41 |
 | NFR-S5 review UIは127.0.0.1のみ | `partially_implemented` | config validatorは実装、serverなし | G11以降 |
 | NFR-S6、§8 依存最小、5 package以内、四半期監査、model provenance | `partially_implemented` | lockfileは存在するが、本番依存は仕様の予算を超え、定期audit・license/provenance確認がない | G10 |
 | §7-4 crash再開、二重処理防止 | `partially_implemented` | pending/finalized、自動回復、排他、重複reviewをunit/integrationで確認 | G46のforced-crash subprocess E2E |
-| §7-4 model/endpoint設定1箇所 | `partially_implemented` | process/inboxはconfig、extractはmodule既定値 | G05 |
+| §7-4 model/endpoint設定1箇所 | `partially_implemented` | G05でendpoint/model/temperatureの検証・解決を`OllamaConfig`へ統一し、全公開抽出CLIへ伝播 | LiteLLMのbase_url差し替えだけによる対応は未実装。localhost外は拒否 |
 | §7-4 CSV撤退経路 | `requires_user_decision` | export契約未定義 | G38、G39 |
 
 ## 5. テスト計画と受入基準
@@ -112,7 +112,7 @@ GitHub Issueは
 | G02 | P0 | 重複除外の永続状態と集計規則のADR | なし | blocked: user decision |
 | G03 | P0 | 非レシート構造化判定 | なし | implemented: schema/validation/failed recoveryを自動test |
 | G04 | P0 | 最大3回の抽出variant再試行 | G03推奨（hard dependencyではない） | implemented: 決定的な順序・停止条件・cleanupを自動test |
-| G05 | P1 | 全抽出CLIのmodel/endpoint設定統一 | なし | waiting |
+| G05 | P1 | 全抽出CLIのmodel/endpoint設定統一 | なし | implemented: 中央validator、解決優先順位、loopback境界、全経路伝播を自動test |
 | G06 | P1 | 機微情報を含まない段階別処理時間計測 | G49 | blocked: G49 |
 | G07 | P1 | raw品目名とname_normの分離 | なし | waiting |
 | G08 | P2 | Takeoutローカルフォルダ安全投入 | なし | waiting |
@@ -173,14 +173,20 @@ GitHub Issueは
 
 ## 7. 今回の実装境界
 
-Issue #4では、初回を含む最大3試行をstandard、時計回り90度、2倍拡大の順で行う。
-不正JSON、schema-invalid、Ollama timeoutだけを次のvariantへ進め、schema-validな
-非レシートとreviewは停止する。接続、HTTP、応答包絡、画像、DB、ファイルの例外は
-即時停止する。全試行は同じlocalhost endpoint、model、temperatureを使い、採用した
-payloadだけを税正規化、重複判定、DB保存へ一度渡す。一時variantは処理後に削除し、
-元画像、既存のpHash、transaction、pending/finalized回復契約を変更しない。
+Issue #5では、endpoint、model、temperatureの中央既定値と検証を
+`OllamaConfig`へ集約し、通常のprocess/inboxは`AppConfig`内の同じobjectを使う。
+standalone extractは`RECEBAKO_CONFIG`、既定設定ファイル、そのファイルがない場合
+だけ中央builtin defaultの順で解決する。明示設定の欠落・不正と、存在する既定設定の
+不正はfallbackしない。将来watcherも同じ`AppConfig` APIを使うが、このIssueでは
+watcher自体を実装しない。
 
-外部AI、model切替、DB migration、試行履歴の永続化、private画像によるdegraded/
-nonreceipt受入は追加しない。timeoutが3試行続く最悪時間の性能評価はNFR-P1の測定境界
-を定めるG49と、計測・benchmarkを行うG06/G43の範囲に残す。Issue #4のCIは合成画像と
-mock Ollama応答だけを使用する。
+endpoint入力はHTTPの`127.0.0.1`と`localhost`だけを許可し、local portを保った
+数値loopbackへ正規化する。remote、userinfo、root以外のpath、query、fragment、
+を事前に拒否し、環境proxyを無効化してredirectを追従しない。evaluationは品質比較契約上
+modelだけを既定pairまたは`--model`で差し替え、endpointとtemperatureはbase config
+から継承した検証済みobjectを使う。既存の公開Python scalar APIは中央validatorへの
+互換shimとして維持する。
+
+production既定model、DB、抽出schema、外部AI、LiteLLM、model download、idle unload、
+性能benchmarkは変更しない。外向き通信の実環境受入はG37/G47、idle unloadはG52、
+性能測定はG43の範囲に残す。Issue #5のCIはmock通信だけを使用する。

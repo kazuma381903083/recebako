@@ -159,11 +159,11 @@ def test_process_retry_persists_only_accepted_payload_and_runs_postprocessing_on
     invalid_payload = json.dumps({"store": discarded_sentinel})
     accepted_payload = _payload()
     responses = iter([invalid_payload, accepted_payload])
-    request_calls: list[tuple[str, dict[str, Any]]] = []
+    request_calls: list[tuple[str, Any]] = []
     stage_calls = {"tax": 0, "duplicate": 0, "save": 0}
 
-    def fake_request(path: Path, **kwargs: Any) -> str:
-        request_calls.append((path.name, dict(kwargs)))
+    def fake_request(path: Path, *, config: Any) -> str:
+        request_calls.append((path.name, config))
         return next(responses)
 
     original_tax_normalization = (
@@ -207,15 +207,11 @@ def test_process_retry_persists_only_accepted_payload_and_runs_postprocessing_on
 
     result, audit = _run_with_audit(image_path, config=config)
 
-    expected_settings = {
-        "base_url": "http://127.0.0.1:11434",
-        "model": "qwen3-vl:8b",
-        "temperature": 0,
-    }
-    assert request_calls == [
-        ("variant-1-standard.jpg", expected_settings),
-        ("variant-2-rotated-clockwise-90.jpg", expected_settings),
+    assert [path for path, _ in request_calls] == [
+        "variant-1-standard.jpg",
+        "variant-2-rotated-clockwise-90.jpg",
     ]
+    assert all(request_config is config.ollama for _, request_config in request_calls)
     assert stage_calls == {"tax": 1, "duplicate": 1, "save": 1}
     assert result.status is ReceiptStatus.CONFIRMED
     assert audit.schema_outcome is SchemaOutcome.VALID

@@ -8,7 +8,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from recebako.ai import request_receipt_extraction
+from recebako.ai import (
+    request_receipt_extraction_with_config as request_receipt_extraction,
+)
 from recebako.config import AppConfig
 from recebako.domain import (
     IngestMode,
@@ -123,9 +125,7 @@ def process_receipt_with_audit(
             variants,
             request=lambda variant_path: request_receipt_extraction(
                 variant_path,
-                base_url=config.ollama.base_url,
-                model=config.ollama.model,
-                temperature=config.ollama.temperature,
+                config=config.ollama,
             ),
             reference_date=reference_date,
             mode=mode,

@@ -15,8 +15,16 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from recebako.ai import OllamaError, request_receipt_extraction
-from recebako.config import AppConfig, ConfigError, load_config
+from recebako.ai import OllamaError
+from recebako.ai import (
+    request_receipt_extraction_with_config as request_receipt_extraction,
+)
+from recebako.config import (
+    AppConfig,
+    ConfigError,
+    load_config,
+    load_ollama_config_for_extract,
+)
 from recebako.domain import (
     IngestMode,
     NormalizedReceiptExtraction,
@@ -252,6 +260,12 @@ def _local_date() -> date:
 
 
 def _run_extract(args: argparse.Namespace) -> int:
+    try:
+        ollama_config = load_ollama_config_for_extract()
+    except ConfigError as exc:
+        print(f"recebako: error: {exc}", file=sys.stderr)
+        return 1
+
     image_path: Path = args.image
     if not _validate_image_path(image_path):
         return 2
@@ -260,7 +274,10 @@ def _run_extract(args: argparse.Namespace) -> int:
         with preprocess_image_variants(image_path) as variants:
             extraction_result = extract_with_variant_retry(
                 variants,
-                request=request_receipt_extraction,
+                request=lambda variant_path: request_receipt_extraction(
+                    variant_path,
+                    config=ollama_config,
+                ),
                 reference_date=_local_date(),
                 mode=IngestMode(args.mode),
             )

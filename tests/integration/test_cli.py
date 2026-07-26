@@ -11,7 +11,7 @@ from PIL import Image
 
 from recebako import cli
 from recebako.ai import OllamaTimeoutError
-from recebako.config import CONFIG_ENV_VAR
+from recebako.config import CONFIG_ENV_VAR, OllamaConfig
 from recebako.runtime import (
     InboxLock,
     RuntimeFileError,
@@ -20,8 +20,17 @@ from recebako.runtime import (
     scan_inbox,
 )
 
+EXPLICIT_OLLAMA_BASE_URL = "http://localhost:12555"
+CANONICAL_OLLAMA_BASE_URL = "http://127.0.0.1:12555"
 
-def _write_config(tmp_path: Path, data_root: Path) -> Path:
+
+def _write_config(
+    tmp_path: Path,
+    data_root: Path,
+    *,
+    base_url: str = "http://127.0.0.1:11434",
+    model: str = "qwen3-vl:8b",
+) -> Path:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f"""
@@ -29,8 +38,8 @@ def _write_config(tmp_path: Path, data_root: Path) -> Path:
 root = {json.dumps(str(data_root))}
 
 [ollama]
-base_url = "http://127.0.0.1:11434"
-model = "qwen3-vl:8b"
+base_url = {json.dumps(base_url)}
+model = {json.dumps(model)}
 temperature = 0
 
 [review_ui]
@@ -40,6 +49,14 @@ port = 8765
         encoding="utf-8",
     )
     return config_path
+
+
+def _use_implicit_extract_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
 
 
 def _today() -> date:
@@ -191,6 +208,7 @@ def test_extract_command_prints_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _use_implicit_extract_defaults(tmp_path, monkeypatch)
     image_path = tmp_path / "receipt.jpg"
     with Image.new("RGB", (3000, 1000), "white") as image:
         image.save(image_path)
@@ -198,8 +216,15 @@ def test_extract_command_prints_json(
     today = _today()
     raw_date = f"{today.year}/{today.month}/{today.day}"
 
-    def fake_request_receipt_extraction(path: Path) -> str:
+    received_configs: list[OllamaConfig] = []
+
+    def fake_request_receipt_extraction(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
         temporary_paths.append(path)
+        received_configs.append(config)
         assert path != image_path
         with Image.open(path) as image:
             assert image.mode == "RGB"
@@ -227,6 +252,13 @@ def test_extract_command_prints_json(
     assert captured.err == ""
     assert len(temporary_paths) == 1
     assert not temporary_paths[0].exists()
+    assert [config.model_dump(mode="json") for config in received_configs] == [
+        {
+            "base_url": "http://127.0.0.1:11434",
+            "model": "qwen3-vl:8b",
+            "temperature": 0,
+        }
+    ]
 
 
 def test_extract_retries_invalid_response_and_prints_only_accepted_json(
@@ -234,14 +266,16 @@ def test_extract_retries_invalid_response_and_prints_only_accepted_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _use_implicit_extract_defaults(tmp_path, monkeypatch)
     image_path = tmp_path / "receipt.jpg"
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
     private_sentinel = "PRIVATE-DISCARDED-CLI-ATTEMPT"
     calls: list[str] = []
 
-    def invalid_then_valid(path: Path) -> str:
+    def invalid_then_valid(path: Path, *, config: OllamaConfig) -> str:
         calls.append(path.name)
+        assert config.model == "qwen3-vl:8b"
         if len(calls) == 1:
             return json.dumps({"store": private_sentinel})
         return _ollama_payload(receipt_date=_today().isoformat())
@@ -271,13 +305,16 @@ def test_extract_resolves_multiple_external_tax_rates_from_unique_subtotals(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _use_implicit_extract_defaults(tmp_path, monkeypatch)
     image_path = tmp_path / "multiple-tax-rates.jpg"
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
     monkeypatch.setattr(
         cli,
         "request_receipt_extraction",
-        lambda path: _multiple_external_tax_payload(receipt_date="2022年05月14日"),
+        lambda path, *, config: _multiple_external_tax_payload(
+            receipt_date="2022年05月14日"
+        ),
     )
 
     exit_code = cli.run(["extract", str(image_path), "--mode", "historical"])
@@ -309,13 +346,14 @@ def test_extract_command_prints_failed_as_valid_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _use_implicit_extract_defaults(tmp_path, monkeypatch)
     image_path = tmp_path / "receipt.png"
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
     monkeypatch.setattr(
         cli,
         "request_receipt_extraction",
-        lambda path: '{"store": "missing required fields"}',
+        lambda path, *, config: '{"store": "missing required fields"}',
     )
 
     exit_code = cli.run(["extract", str(image_path)])
@@ -334,6 +372,7 @@ def test_extract_command_routes_non_receipt_without_exposing_payload(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _use_implicit_extract_defaults(tmp_path, monkeypatch)
     image_path = tmp_path / "image.png"
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
@@ -341,7 +380,7 @@ def test_extract_command_routes_non_receipt_without_exposing_payload(
     monkeypatch.setattr(
         cli,
         "request_receipt_extraction",
-        lambda path: json.dumps(
+        lambda path, *, config: json.dumps(
             {
                 "is_receipt": False,
                 "store": private_sentinel,
@@ -378,8 +417,10 @@ def test_extract_command_routes_non_receipt_without_exposing_payload(
 
 def test_extract_command_rejects_missing_image(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _use_implicit_extract_defaults(tmp_path, monkeypatch)
     missing_path = tmp_path / "missing.jpg"
 
     exit_code = cli.run(["extract", str(missing_path)])
@@ -388,6 +429,116 @@ def test_extract_command_rejects_missing_image(
     assert exit_code == 2
     assert captured.out == ""
     assert "画像ファイルが見つかりません" in captured.err
+
+
+@pytest.mark.parametrize("config_kind", ["missing", "invalid"])
+def test_extract_explicit_bad_config_does_not_fallback_or_start_processing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config_kind: str,
+) -> None:
+    image_path = tmp_path / "synthetic.jpg"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    data_root = tmp_path / "must-not-be-created"
+    if config_kind == "missing":
+        config_path = tmp_path / "explicit-missing.toml"
+    else:
+        config_path = _write_config(
+            tmp_path,
+            data_root,
+            base_url="https://remote.invalid:11434",
+        )
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    started: list[str] = []
+
+    def forbidden_stage(*args: Any, **kwargs: Any) -> Any:
+        started.append("called")
+        pytest.fail("configuration errors must stop before image or network work")
+
+    monkeypatch.setattr(cli, "preprocess_image_variants", forbidden_stage)
+    monkeypatch.setattr(cli, "request_receipt_extraction", forbidden_stage)
+
+    exit_code = cli.run(["extract", str(image_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err.startswith("recebako: error: ")
+    assert started == []
+    assert not data_root.exists()
+    for forbidden in (
+        str(config_path),
+        "remote.invalid",
+        "11434",
+    ):
+        assert forbidden not in captured.err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("process", "synthetic.jpg"),
+        ("inbox", "run"),
+        (
+            "evaluate",
+            "run",
+            "synthetic-source",
+            "--output-root",
+            "synthetic-output",
+        ),
+    ],
+)
+def test_invalid_config_stops_other_extraction_clis_before_runtime_or_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+) -> None:
+    data_root = tmp_path / "must-not-be-created"
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url="http://remote.invalid:11434",
+    )
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    started: list[str] = []
+
+    def forbidden_stage(*args: Any, **kwargs: Any) -> Any:
+        started.append("called")
+        pytest.fail("configuration errors must stop before runtime or network work")
+
+    for attribute in (
+        "_validate_image_path",
+        "initialize_runtime",
+        "preprocess_image_variants",
+        "process_receipt",
+        "request_receipt_extraction",
+        "run_inbox",
+        "run_evaluation",
+    ):
+        monkeypatch.setattr(cli, attribute, forbidden_stage)
+
+    resolved_argv = tuple(
+        str(tmp_path / value) if value.startswith("synthetic") else value
+        for value in argv
+    )
+    exit_code = cli.run(resolved_argv)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err.startswith("recebako: error: ")
+    assert started == []
+    assert not data_root.exists()
+    assert not (tmp_path / "synthetic-output").exists()
+    for forbidden in (
+        str(config_path),
+        "remote.invalid",
+        "11434",
+    ):
+        assert forbidden not in captured.err
 
 
 @pytest.mark.parametrize(
@@ -409,12 +560,26 @@ def test_extract_mode_normalizes_old_date_without_database(
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
     data_root = tmp_path / "data"
-    config_path = _write_config(tmp_path, data_root)
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url=EXPLICIT_OLLAMA_BASE_URL,
+    )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    received_configs: list[OllamaConfig] = []
+
+    def fake_request(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
+        received_configs.append(config)
+        return _ollama_payload(receipt_date="2020/1/1")
+
     monkeypatch.setattr(
         cli,
         "request_receipt_extraction",
-        lambda path: _ollama_payload(receipt_date="2020/1/1"),
+        fake_request,
     )
 
     exit_code = cli.run(["extract", str(image_path), "--mode", mode])
@@ -430,6 +595,13 @@ def test_extract_mode_normalizes_old_date_without_database(
     )
     assert not (data_root / "ledger.db").exists()
     assert captured.err == ""
+    assert [config.model_dump(mode="json") for config in received_configs] == [
+        {
+            "base_url": CANONICAL_OLLAMA_BASE_URL,
+            "model": "qwen3-vl:8b",
+            "temperature": 0,
+        }
+    ]
 
 
 def test_db_init_creates_database(
@@ -460,13 +632,21 @@ def test_process_saves_receipt_and_second_run_as_duplicate(
         image.save(image_path)
     original_bytes = image_path.read_bytes()
     data_root = tmp_path / "data"
-    config_path = _write_config(tmp_path, data_root)
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url=EXPLICIT_OLLAMA_BASE_URL,
+    )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
 
-    def fake_process_extraction(path: Path, **kwargs: Any) -> str:
+    def fake_process_extraction(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
         assert path != image_path
-        assert kwargs == {
-            "base_url": "http://127.0.0.1:11434",
+        assert config.model_dump(mode="json") == {
+            "base_url": CANONICAL_OLLAMA_BASE_URL,
             "model": "qwen3-vl:8b",
             "temperature": 0,
         }
@@ -702,15 +882,29 @@ def test_inbox_run_command_outputs_one_json_document(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     data_root = tmp_path / "data"
-    config_path = _write_config(tmp_path, data_root)
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url=EXPLICIT_OLLAMA_BASE_URL,
+    )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
     image_path = data_root / "inbox" / "receipt.JPG"
     image_path.parent.mkdir(parents=True)
     with Image.new("RGB", (120, 80), "white") as image:
         image.save(image_path)
+    received_configs: list[OllamaConfig] = []
+
+    def fake_request(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
+        received_configs.append(config)
+        return _ollama_payload(receipt_date=_today().isoformat())
+
     monkeypatch.setattr(
         "recebako.pipeline.process.request_receipt_extraction",
-        lambda path, **kwargs: _ollama_payload(receipt_date=_today().isoformat()),
+        fake_request,
     )
 
     exit_code = cli.run(["inbox", "run", "--limit", "1"])
@@ -727,6 +921,13 @@ def test_inbox_run_command_outputs_one_json_document(
     for private_field in ("store", "items", "total", "raw_payload"):
         assert private_field not in serialized
     assert captured.err == ""
+    assert [config.model_dump(mode="json") for config in received_configs] == [
+        {
+            "base_url": CANONICAL_OLLAMA_BASE_URL,
+            "model": "qwen3-vl:8b",
+            "temperature": 0,
+        }
+    ]
 
 
 def test_inbox_run_non_receipt_stdout_contains_only_safe_fields(
@@ -887,7 +1088,11 @@ def test_evaluate_run_uses_default_models_and_isolated_ledgers_without_touching_
     sentinel = data_root / "keep.bin"
     sentinel.write_bytes(b"normal-data-must-remain-unchanged")
     sentinel_snapshot = (sentinel.read_bytes(), sentinel.stat().st_mtime_ns)
-    config_path = _write_config(tmp_path, data_root)
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url=EXPLICIT_OLLAMA_BASE_URL,
+    )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
 
     raw_marker = "synthetic-sensitive-raw-marker"
@@ -896,12 +1101,16 @@ def test_evaluate_run_uses_default_models_and_isolated_ledgers_without_touching_
     private_total = 765_431
     calls: list[tuple[str, str, int, bytes]] = []
 
-    def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
+    def fake_request_receipt_extraction(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
         calls.append(
             (
-                kwargs["base_url"],
-                kwargs["model"],
-                kwargs["temperature"],
+                config.base_url,
+                config.model,
+                config.temperature,
                 path.read_bytes(),
             )
         )
@@ -945,8 +1154,8 @@ def test_evaluate_run_uses_default_models_and_isolated_ledgers_without_touching_
     assert [
         (base_url, model, temperature) for base_url, model, temperature, _ in calls
     ] == [
-        ("http://127.0.0.1:11434", "qwen3-vl:8b", 0),
-        ("http://127.0.0.1:11434", "qwen3.5:9b", 0),
+        (CANONICAL_OLLAMA_BASE_URL, "qwen3-vl:8b", 0),
+        (CANONICAL_OLLAMA_BASE_URL, "qwen3.5:9b", 0),
     ]
     assert calls[0][3] == calls[1][3]
     assert [model["model_name"] for model in report["models"]] == [
@@ -1022,13 +1231,22 @@ def test_evaluate_run_keeps_mixed_model_failures_in_safe_json_and_isolated_dbs(
             image.save(source_root / f"{case_id}.png")
 
     data_root = tmp_path / "normal-data"
-    config_path = _write_config(tmp_path, data_root)
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url=EXPLICIT_OLLAMA_BASE_URL,
+        model="qwen3.5:9b",
+    )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
     private_sentinel = "synthetic-sensitive-failure-998877"
     calls_by_model: dict[str, int] = {}
 
-    def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
-        model = str(kwargs["model"])
+    def fake_request_receipt_extraction(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
+        model = config.model
         calls_by_model[model] = calls_by_model.get(model, 0) + 1
         if calls_by_model[model] <= 3:
             raise OllamaTimeoutError(private_sentinel)
@@ -1141,14 +1359,25 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
         image.save(source_root / "case-0001.png")
 
     data_root = tmp_path / "normal-data"
-    config_path = _write_config(tmp_path, data_root)
+    config_path = _write_config(
+        tmp_path,
+        data_root,
+        base_url=EXPLICIT_OLLAMA_BASE_URL,
+        model="qwen3.5:9b",
+    )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
     private_sentinel = "synthetic-private-sidecar-sentinel"
     private_store = f"{private_sentinel}-store"
     private_item = f"{private_sentinel}-item"
     private_total = 864_209
+    received_configs: list[OllamaConfig] = []
 
-    def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
+    def fake_request_receipt_extraction(
+        path: Path,
+        *,
+        config: OllamaConfig,
+    ) -> str:
+        received_configs.append(config)
         return json.dumps(
             {
                 "is_receipt": True,
@@ -1208,6 +1437,13 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
     assert accuracy["status"] == "measured"
     assert accuracy["reason"] is None
     assert accuracy["verified_case_count"] == 1
+    assert [config.model_dump(mode="json") for config in received_configs] == [
+        {
+            "base_url": CANONICAL_OLLAMA_BASE_URL,
+            "model": "qwen3-vl:8b",
+            "temperature": 0,
+        }
+    ]
     for field_name in (
         "store",
         "date",
