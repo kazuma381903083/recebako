@@ -7,7 +7,7 @@ metric version: `quality-v1`
 ## 目的とデータ境界
 
 Git管理外の匿名評価画像と、人間が入力したground truthを使い、同一条件で
-ローカルモデルを比較した変更前baselineである。本文には集計値だけを記録し、
+ローカルモデルを比較した品質改善前baselineである。本文には集計値だけを記録し、
 privateな入力、正解値、抽出値、識別子、path、生応答を含めない。
 
 評価sourceは読み取り専用として扱い、modelごとに評価runtimeとSQLiteを分離した。
@@ -28,9 +28,10 @@ privateな入力、正解値、抽出値、識別子、path、生応答を含め
 | DB隔離 | modelごとに専用SQLite |
 | prompt・抽出schema | 両modelで同一 |
 
-両modelは同じ入力を同じ順序で処理した。変更前runの保存済み結果に、承認された
-`quality-v1`をaggregate-onlyで適用している。実装後のrunではmodel名、prompt、
-抽出schemaのprovenanceが`quality-baseline-report.json`へ記録される。
+両modelは同じ入力を同じ順序で処理した。実装後runの
+`quality-baseline-report.json`へ、承認された`quality-v1`のaggregateだけと、
+model名、prompt、抽出schemaのprovenanceを記録した。既存reportとの集計一致、
+sidecarの型、private allowlist境界、保存権限を再検証している。
 対応形式の匿名画像30件をprivateなstaging copyから評価し、source自体は変更して
 いない。
 
@@ -70,7 +71,7 @@ actual欠損による不一致として扱い、分母から除外しない。`c
 | 税正規化 採用 / 拒否 | 3 / 18 | 0 / 22 |
 | 日付 正規化 / 拒否 / 無変更 / 未評価 | 26 / 2 / 2 / 0 | 20 / 8 / 0 / 2 |
 | 重複 none / 未評価 | 30 / 0 | 28 / 2 |
-| 処理時間 最短 / 平均 / 最長 | 10.8 / 30.7 / 67.5秒/件 | 12.8 / 44.0 / 180.0秒/件 |
+| 処理時間 最短 / 平均 / 最長 | 15.3 / 38.1 / 76.9秒/件 | 12.5 / 46.3 / 180.0秒/件 |
 
 税正規化の採用数・拒否数は処理結果の集計であり、税情報のaccuracyではない。
 重複結果には、このrunで`identity`または`phash`と判定されたものはなかった。
@@ -129,3 +130,5 @@ Q4の0%は、今回観測したactual `confirmed`のうち合計不一致がな�
    回帰評価し、confirmed率だけで優劣を決めない。
 
 Issue #42ではmodel、prompt、検証閾値、model既定値を変更しない。
+今回のprivate E2Eは22/30 verifiedでsidecar生成まで確認したが、Issue #42の
+30/30 private受入は、残る8件を人間が確認するまで未完了である。

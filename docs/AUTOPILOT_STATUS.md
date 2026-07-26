@@ -57,14 +57,16 @@
 - target 30件に対してverified 22件のため、観測rateは記録するがQ1〜Q5の
   assessmentは全modelで`unknown`
 - `qwen3-vl:8b`: processing/schema 100.0%、confirmed/review/failed
-  33.3%/66.7%/0.0%、平均30.7秒/件
+  33.3%/66.7%/0.0%、平均38.1秒/件
 - `qwen3.5:9b`: processing/schema 93.3%/93.3%、confirmed/review/failed
-  10.0%/83.3%/6.7%、平均44.0秒/件
+  10.0%/83.3%/6.7%、平均46.3秒/件
 - 品質観測値と計算方法: `docs/BASELINE_REPORT.md`
 - confirmed率をaccuracyとして扱わず、model既定値、prompt、検証閾値は変更して
   いない
 - private境界: 評価source不変、model別DB分離、通常利用DB非変更、Git記録は
   aggregate値だけ
+- 22/30 private E2Eでsidecar型、legacy集計一致、provenance、0600権限、
+  private allowlist境界を確認済み
 
 ## Remaining
 
