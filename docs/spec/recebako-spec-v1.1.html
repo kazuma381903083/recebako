@@ -357,6 +357,7 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
        7. 判定と読み取りに対する自信をconfidenceに0.0-1.0で正直に申告する"
   }]
 }</span></pre>
+  <p class="note">抽出時のendpoint、model、temperatureは、検証済みの<code>OllamaConfig</code>を唯一のruntime設定objectとして全経路へ渡す。通常のprocess、inboxと将来のwatcherは同じ<code>AppConfig</code>からこのobjectを受け取り、試行ごとに個別の既定値を解決しない。既存のPython scalar APIは後方互換shimとして残すが、値を直接信用せず同じ中央validatorへ通す。</p>
   <h3><span class="hn">6-2</span>検証ロジック — 「三値管理」で品質を作る</h3>
   <p>VLMの出力を信用せず、機械検証を通す。<em>品質はモデルではなく検証で作る</em>のが本仕様の思想。決済の三値管理と同じで、「成功/失敗」の間に「不明(要確認)」を明示的に置く。</p>
   <div class="tbl-scroll"><table>
@@ -439,7 +440,8 @@ footer{border-top:3px solid var(--ink);padding-top:14px;font-size:11.5px;color:v
   <h3><span class="hn">7-4</span>可用性・保守性</h3>
   <ul class="plain">
     <li><strong>再開性：</strong>どの段階でクラッシュしてもファイルの場所（フォルダ＝状態）から安全に再開できる。二重処理はpHashで防ぐ。</li>
-    <li><strong>モデル差し替え：</strong>モデル名・エンドポイントは設定ファイル1箇所。将来LiteLLM経由に切り替える場合もbase_url変更のみで対応可能なこと。</li>
+    <li><strong>モデル・endpoint設定：</strong>endpoint、model、temperatureは設定ファイル1箇所から検証済み<code>OllamaConfig</code>として解決する。将来LiteLLM経由に切り替える場合も<code>base_url</code>変更のみで対応可能なこと。standalone extractの優先順位は、<code>RECEBAKO_CONFIG</code>で明示した設定、既定設定ファイル、そのファイルが存在しない場合だけ中央builtin defaultの順とする。明示した設定の欠落・不正と、存在する既定設定の不正はfallbackせずerrorにする。</li>
+    <li><strong>ローカル通信境界：</strong>現行のOllama直接通信では、endpointの入力はHTTPの<code>127.0.0.1</code>または<code>localhost</code>だけを許可し、任意のローカルportを含む数値loopbackへ正規化する。userinfo、root以外のpath、query、fragment、remote hostを拒否し、環境proxyを使用せずredirectを追従しない。LiteLLM対応と外部endpointは未実装であり、対応実装まではlocalhost外への変更を許可しない。</li>
     <li><strong>撤退容易性：</strong>全データはSQLite1ファイル＋画像フォルダ。CSVエクスポート機能を持ち、いつでも他の家計簿アプリへ移行できる（ロックイン無し）。</li>
   </ul>
 </section>

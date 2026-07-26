@@ -5,6 +5,7 @@ from recebako.ai.ollama import (
     OllamaTimeoutError,
     extract_receipt,
     request_receipt_extraction,
+    request_receipt_extraction_with_config,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "OllamaTimeoutError",
     "extract_receipt",
     "request_receipt_extraction",
+    "request_receipt_extraction_with_config",
 ]

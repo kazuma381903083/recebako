@@ -19,7 +19,7 @@ from pathlib import Path
 
 from recebako.ai import OllamaError
 from recebako.ai.ollama import EXTRACTION_PROMPT
-from recebako.config import AppConfig, DataConfig
+from recebako.config import AppConfig, DataConfig, ollama_config_with_model
 from recebako.domain import IngestMode, ReceiptExtraction
 from recebako.evaluation.dataset import EvaluationCase, discover_cases
 from recebako.evaluation.models import (
@@ -489,8 +489,9 @@ def _run_model(
         model_config = base_config.model_copy(
             update={
                 "data": DataConfig(root=data_root),
-                "ollama": base_config.ollama.model_copy(
-                    update={"model": model_name},
+                "ollama": ollama_config_with_model(
+                    base_config.ollama,
+                    model=model_name,
                 ),
             }
         )

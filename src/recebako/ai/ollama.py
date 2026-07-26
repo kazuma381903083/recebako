@@ -7,11 +7,17 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from recebako.config import (
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_TEMPERATURE,
+    OllamaConfig,
+)
 from recebako.domain import ReceiptExtraction
 
-OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-OLLAMA_MODEL = "qwen3-vl:8b"
+OLLAMA_CHAT_URL = f"{DEFAULT_OLLAMA_BASE_URL}/api/chat"
+OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
+OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 CONNECT_TIMEOUT_SECONDS = 5.0
 READ_TIMEOUT_SECONDS = 180.0
 WRITE_TIMEOUT_SECONDS = 30.0
@@ -85,15 +91,19 @@ def _request_payload(
     }
 
 
-def request_receipt_extraction(
+def request_receipt_extraction_with_config(
     image_path: Path,
     *,
-    base_url: str = OLLAMA_BASE_URL,
-    model: str = OLLAMA_MODEL,
-    temperature: int = 0,
+    config: OllamaConfig,
 ) -> str:
-    if base_url != OLLAMA_BASE_URL:
-        raise OllamaError("Ollama接続先は127.0.0.1:11434のみ指定できます")
+    try:
+        validated_config = OllamaConfig(
+            base_url=config.base_url,
+            model=config.model,
+            temperature=config.temperature,
+        )
+    except (AttributeError, ValidationError):
+        raise OllamaError("Ollama設定が安全条件を満たしていません") from None
 
     image_bytes = image_path.read_bytes()
 
@@ -106,13 +116,14 @@ def request_receipt_extraction(
                 pool=POOL_TIMEOUT_SECONDS,
             ),
             trust_env=False,
+            follow_redirects=False,
         ) as client:
             response = client.post(
-                f"{base_url}/api/chat",
+                f"{validated_config.base_url}/api/chat",
                 json=_request_payload(
                     image_bytes,
-                    model=model,
-                    temperature=temperature,
+                    model=validated_config.model,
+                    temperature=validated_config.temperature,
                 ),
             )
         response.raise_for_status()
@@ -126,7 +137,7 @@ def request_receipt_extraction(
         ) from exc
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         raise OllamaConnectionError(
-            "Ollamaへ接続できませんでした (http://127.0.0.1:11434 を確認してください)"
+            "設定したlocalhostのOllamaへ接続できませんでした"
         ) from exc
     except httpx.RequestError as exc:
         raise OllamaConnectionError("Ollamaとのローカル通信に失敗しました") from exc
@@ -141,12 +152,32 @@ def request_receipt_extraction(
     return chat_response.message.thinking
 
 
+def request_receipt_extraction(
+    image_path: Path,
+    *,
+    base_url: str = OLLAMA_BASE_URL,
+    model: str = OLLAMA_MODEL,
+    temperature: int = DEFAULT_OLLAMA_TEMPERATURE,
+) -> str:
+    """Backward-compatible scalar API backed by the validated config model."""
+
+    try:
+        config = OllamaConfig(
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+        )
+    except ValidationError:
+        raise OllamaError("Ollama設定が安全条件を満たしていません") from None
+    return request_receipt_extraction_with_config(image_path, config=config)
+
+
 def extract_receipt(
     image_path: Path,
     *,
     base_url: str = OLLAMA_BASE_URL,
     model: str = OLLAMA_MODEL,
-    temperature: int = 0,
+    temperature: int = DEFAULT_OLLAMA_TEMPERATURE,
 ) -> ReceiptExtraction:
     try:
         return ReceiptExtraction.model_validate_json(

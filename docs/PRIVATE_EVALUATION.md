@@ -16,7 +16,9 @@ ground truth, databases, or extracted values in Git.
   contain private extraction data even though the JSON report does not.
 - The command copies source images into each isolated model runtime. It does not
   move, rename, edit, or remove source images.
-- Runtime inference remains limited to the configured localhost Ollama endpoint.
+- Runtime inference uses the validated Ollama configuration and remains limited to
+  an HTTP loopback endpoint. `localhost` input is canonicalized to numeric
+  loopback; remote hosts, environment proxies, and redirects are not used.
 - Run the evaluation only in a trusted local login session. Static symbolic links
   and directory replacement between processing stages are rejected, but a hostile
   process running concurrently as the same OS account is outside the isolation
@@ -43,6 +45,12 @@ Repeat `--model` to select one or both models explicitly. Each model receives it
 own runtime and `ledger.db`, so one model's duplicate decisions cannot affect the
 other. The normal configured `data.root` is never initialized or written by an
 evaluation run.
+
+Evaluation model selection is a quality-measurement-only override. Each selected
+model receives a newly validated Ollama configuration whose endpoint and
+temperature are inherited unchanged from the base application configuration.
+Neither the default model pair nor `--model` can override the endpoint or
+temperature, and they do not change the production model default.
 
 Successful stdout is one JSON report. Operational errors use a fixed,
 private-safe stderr message. A copy of the report is written as

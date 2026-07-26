@@ -1,7 +1,7 @@
 # Recebako Autopilot Status
 
 更新日: 2026-07-26
-作業ブランチ: `issue/4-extraction-variant-retry`
+作業ブランチ: `issue/5-unified-ollama-config`
 
 ## Phase 1C
 
@@ -25,8 +25,10 @@
 - Pull Request [#64](https://github.com/kazuma381903083/recebako/pull/64)はmainへmerge済み
 - Issue #42はユーザーが22/30 verifiedの現行baselineを受け入れたためclose済み
 - Pull Request #65はIssue #42の受入記録、Pull Request #66はIssue #3の実装として
-  main向けに作成済み。Issue #4は両変更の後続として独立commitにする
-- Issue #3とIssue #4の起点mainはPR #64のmerge commit `a59ebb5`
+  main向けに作成済み
+- Pull Request [#67](https://github.com/kazuma381903083/recebako/pull/67)はIssue #4の
+  実装としてmain向けに作成済み。Issue #5は#65、#66、#67の後続として独立commitにする
+- Issue #3〜#5の起点mainはPR #64のmerge commit `a59ebb5`
 
 ## Phase 2 private evaluation
 
@@ -114,9 +116,32 @@
 - DB migration、新規依存、外部AI、モデル既定値、timeout、confidence閾値の変更なし
 - 自動検査: private-file scan、ruff、format、mypy、388 tests、diff checks成功
 
+## Phase 2 unified Ollama configuration
+
+- 状態: Issue #5の実装、仕様更新、回帰test、全検査を作業ブランチで完了
+- 対象Issue: `#5`
+- source of truth: endpoint、model、temperatureの中央既定値と検証を
+  frozen `OllamaConfig`へ集約。AI層の既存定数は中央値の互換aliasとした
+- 通信境界: HTTPの`127.0.0.1`または`localhost`だけを受理し、portを保った数値
+  loopbackへ正規化。不正endpointは画像読込・runtime初期化・通信より前に拒否し、
+  環境proxyを無効化してredirectを追従しない
+- 設定解決: process/inboxは`AppConfig`の同一objectを全試行へ渡す。standalone
+  extractは明示設定、既定設定ファイル、そのファイルが存在しない場合だけ中央builtin
+  defaultの順で解決し、不正設定をfallbackで隠さない
+- 評価: 品質比較の既定2modelと`--model`はmodelだけの明示例外。endpointと
+  temperatureをbase configから継承した新しい検証済みobjectをmodelごとに作り、
+  production設定を変更しない
+- 互換性: 設定なしのstandalone extract、既存CLI JSON、評価report、公開Python
+  scalar APIを維持。scalar APIも通信前に中央validatorへ通す
+- private境界: private画像を使用せず、合成入力とmock通信だけで検証。secret、
+  endpoint入力、絶対pathをerrorや成果物へ追加しない
+- DB migration、新規依存、外部endpoint、LiteLLM、既定model、timeout、抽出schema、
+  prompt、検証閾値の変更なし
+- 自動検査: private-file scan、ruff、format、mypy、467 tests、diff checks成功
+
 ## Remaining
 
-1. Issue #4を独立commitとしてpushし、main向けPull Requestを作成する
-2. Pull Request #65、#66、Issue #4の依存順を保ち、自動mergeせずreviewを待つ
+1. Issue #5を独立commitとしてpushし、main向けPull Requestを作成する
+2. Pull Request #65、#66、#67、Issue #5の依存順を保ち、自動mergeせずreviewを待つ
 3. 次の未実装Issueへ進む。22/30 baselineは現状の評価として維持し、confirmed率を
    accuracyと表現しない

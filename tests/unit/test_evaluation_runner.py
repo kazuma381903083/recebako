@@ -16,7 +16,7 @@ import pytest
 import recebako.evaluation.runner as runner_module
 from recebako.ai import OllamaTimeoutError
 from recebako.ai.ollama import EXTRACTION_PROMPT
-from recebako.config import AppConfig
+from recebako.config import AppConfig, OllamaConfig
 from recebako.domain import (
     IngestMode,
     ReceiptExtraction,
@@ -319,6 +319,9 @@ def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_repor
     production_snapshot = _source_snapshot(production_marker)
     output_root = tmp_path / "evaluation-output"
     process_calls: list[tuple[str, str, Path, Path, Path]] = []
+    ollama_configs: list[OllamaConfig] = []
+    base_config = _config(production_root)
+    base_config_snapshot = base_config.model_dump(mode="json")
 
     def fake_process(
         image_path: Path,
@@ -328,6 +331,7 @@ def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_repor
         temporary_root: Path,
         **kwargs: Any,
     ) -> tuple[ProcessResult, ProcessAudit]:
+        ollama_configs.append(config.ollama)
         process_calls.append(
             (
                 config.ollama.model,
@@ -348,7 +352,7 @@ def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_repor
     report = run_evaluation(
         source_root,
         output_root=output_root,
-        base_config=_config(production_root),
+        base_config=base_config,
         mode=IngestMode.REGULAR,
         reference_date=REFERENCE_DATE,
         clock=_StepClock(),
@@ -361,6 +365,14 @@ def test_run_evaluation_preserves_sources_separates_models_and_writes_safe_repor
         ("qwen3.5:9b", "case-0001"),
         ("qwen3.5:9b", "case-0002"),
     ]
+    assert {
+        (config.base_url, config.model, config.temperature) for config in ollama_configs
+    } == {
+        ("http://127.0.0.1:11434", "qwen3-vl:8b", 0),
+        ("http://127.0.0.1:11434", "qwen3.5:9b", 0),
+    }
+    assert base_config.model_dump(mode="json") == base_config_snapshot
+    assert base_config.ollama.model == "production-model"
     data_roots = {call[2] for call in process_calls}
     assert data_roots == {
         output_root / "run-fixed" / "model-01",

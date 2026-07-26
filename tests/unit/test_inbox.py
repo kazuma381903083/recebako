@@ -419,11 +419,13 @@ def test_run_inbox_confirms_archives_and_saves_relative_path(
     source = data_root / "inbox" / "receipt.jpg"
     original_bytes = _write_image(source)
     temporary_paths: list[Path] = []
+    app_config = _config(data_root)
 
     def fake_request(path: Path, **kwargs: Any) -> str:
         temporary_paths.append(path)
         assert path.is_relative_to(data_root / "tmp")
-        assert kwargs["model"] == "qwen3-vl:8b"
+        assert kwargs == {"config": app_config.ollama}
+        assert kwargs["config"] is app_config.ollama
         return _payload()
 
     monkeypatch.setattr(
@@ -432,7 +434,7 @@ def test_run_inbox_confirms_archives_and_saves_relative_path(
     )
 
     result = run_inbox(
-        config=_config(data_root),
+        config=app_config,
         mode=IngestMode.REGULAR,
         reference_date=REFERENCE_DATE,
     )
