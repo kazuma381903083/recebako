@@ -121,14 +121,16 @@ Q4の0%は、今回観測したactual `confirmed`のうち合計不一致がな�
 
 ## 次の改善候補
 
-1. 残る8件を人間だけで確認し、30/30 verifiedの同一golden setで再実行する。
-2. 完全なgolden setでQ1〜Q5 assessmentとprovenanceを保存し、このbaselineと
-   同じmetric versionで比較する。
-3. 店名、日付、合計、raw品目tuple、税正規化拒否のaggregate reasonを分けて
+1. 22 verified caseの現行baselineを固定し、変更前後を同じmetric version、
+   評価集合、実行条件で比較してprovenanceの差を記録する。
+2. 店名、日付、合計、raw品目tuple、税正規化拒否のaggregate reasonを分けて
    調査し、Issue #60でpromptまたは検証規則の最小変更候補を評価する。
-4. 変更候補ごとに同じmodel順、temperature、mode、reference date、分離DBで
+3. 変更候補ごとに同じmodel順、temperature、mode、reference date、分離DBで
    回帰評価し、confirmed率だけで優劣を決めない。
+4. 将来verified caseを追加する場合も人間だけがground truthを入力し、現行baselineと
+   母集団が異なることをverified件数、評価集合、実行条件とともに文書へ明示する。
 
 Issue #42ではmodel、prompt、検証閾値、model既定値を変更しない。
-今回のprivate E2Eは22/30 verifiedでsidecar生成まで確認したが、Issue #42の
-30/30 private受入は、残る8件を人間が確認するまで未完了である。
+今回のprivate E2Eは30 target（22 human verified）でsidecar生成まで確認し、
+この範囲をIssue #42のbaselineとしてユーザーが受け入れた。golden setは未完成のため
+Q1〜Q5のassessmentは`unknown`を維持し、目標達成とは表現しない。
