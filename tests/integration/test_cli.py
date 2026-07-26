@@ -49,6 +49,7 @@ def _today() -> date:
 def _ollama_payload(*, receipt_date: str, total: int = 100) -> str:
     return json.dumps(
         {
+            "is_receipt": True,
             "store": "テスト商店",
             "date": receipt_date,
             "time": "12:34",
@@ -66,6 +67,7 @@ def _ollama_payload(*, receipt_date: str, total: int = 100) -> str:
 def _mixed_tax_payload(*, receipt_date: str) -> str:
     return json.dumps(
         {
+            "is_receipt": True,
             "store": "テスト商店",
             "date": receipt_date,
             "time": "11:42",
@@ -114,6 +116,7 @@ def _mixed_tax_payload(*, receipt_date: str) -> str:
 def _multiple_external_tax_payload(*, receipt_date: str) -> str:
     return json.dumps(
         {
+            "is_receipt": True,
             "store": "テスト商店",
             "date": receipt_date,
             "time": "19:58",
@@ -219,6 +222,7 @@ def test_extract_command_prints_json(
     assert output["date"] == today.isoformat()
     assert output["status"] == "confirmed"
     assert output["validation_issues"] == []
+    assert "is_receipt" not in output
     assert len(output["phash"]) == 16
     assert captured.err == ""
     assert len(temporary_paths) == 1
@@ -285,6 +289,53 @@ def test_extract_command_prints_failed_as_valid_json(
     assert output["receipt"] is None
     assert output["status"] == "failed"
     assert output["validation_issues"][0]["code"] == "structure.invalid"
+    assert captured.err == ""
+
+
+def test_extract_command_routes_non_receipt_without_exposing_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image_path = tmp_path / "image.png"
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    private_sentinel = "PRIVATE-NON-RECEIPT-CONTENT"
+    monkeypatch.setattr(
+        cli,
+        "request_receipt_extraction",
+        lambda path: json.dumps(
+            {
+                "is_receipt": False,
+                "store": private_sentinel,
+                "date": "not-a-date",
+                "time": "",
+                "items": [{"name": private_sentinel, "qty": 1, "price": 100}],
+                "subtotal": 100,
+                "tax": 0,
+                "tax_breakdowns": [],
+                "total": 100,
+                "payment": "unknown",
+                "confidence": 0.95,
+            }
+        ),
+    )
+
+    exit_code = cli.run(["extract", str(image_path)])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["receipt"] is None
+    assert output["status"] == "failed"
+    assert output["validation_issues"] == [
+        {
+            "code": "receipt.not_receipt",
+            "message": "画像は店舗のレシートではありません",
+            "field": "is_receipt",
+        }
+    ]
+    assert private_sentinel not in captured.out
     assert captured.err == ""
 
 
@@ -641,6 +692,44 @@ def test_inbox_run_command_outputs_one_json_document(
     assert captured.err == ""
 
 
+def test_inbox_run_non_receipt_stdout_contains_only_safe_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    config_path = _write_config(tmp_path, data_root)
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(config_path))
+    image_path = data_root / "inbox" / "image.jpg"
+    image_path.parent.mkdir(parents=True)
+    with Image.new("RGB", (120, 80), "white") as image:
+        image.save(image_path)
+    private_sentinel = "PRIVATE-NON-RECEIPT-CONTENT"
+    payload = json.loads(_ollama_payload(receipt_date="not-a-date"))
+    payload["is_receipt"] = False
+    payload["store"] = private_sentinel
+    payload["items"] = [{"name": private_sentinel, "qty": 1, "price": 100}]
+    monkeypatch.setattr(
+        "recebako.pipeline.process.request_receipt_extraction",
+        lambda path, **kwargs: json.dumps(payload),
+    )
+
+    exit_code = cli.run(["inbox", "run", "--limit", "1"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert exit_code == 0
+    assert output["failed"] == 1
+    assert output["confirmed"] == 0
+    assert output["review"] == 0
+    assert output["results"][0]["status"] == "failed"
+    assert output["results"][0]["destination"] == "failed/1_image.jpg"
+    assert output["results"][0]["error_code"] is None
+    assert private_sentinel not in captured.out
+    assert private_sentinel not in captured.err
+    assert captured.err == "recebako: warning: 1件の処理に失敗しました\n"
+
+
 def test_inbox_run_with_no_files_is_successful_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -781,6 +870,7 @@ def test_evaluate_run_uses_default_models_and_isolated_ledgers_without_touching_
         )
         return json.dumps(
             {
+                "is_receipt": True,
                 "store": private_store,
                 "date": "2026-07-25",
                 "time": "12:34",
@@ -1024,6 +1114,7 @@ def test_evaluate_run_reports_only_aggregate_accuracy_from_human_truth(
     def fake_request_receipt_extraction(path: Path, **kwargs: Any) -> str:
         return json.dumps(
             {
+                "is_receipt": True,
                 "store": private_store,
                 "date": "2026-07-25",
                 "time": "09:15",
